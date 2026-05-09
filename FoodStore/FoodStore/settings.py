@@ -20,13 +20,13 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
 
-    'accounts',
-    'restaurants',
+    #'accounts',
+    #'restaurants',
     'orders',
     'drf_yasg',
 ]
 
-AUTH_USER_MODEL = 'accounts.User'
+#AUTH_USER_MODEL = 'accounts.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

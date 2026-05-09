@@ -1,6 +1,5 @@
 from django.db import models
 from django.conf import settings
-from restaurants.models import Restaurant, MenuItem
 
 class Cart(models.Model):
     user = models.OneToOneField(
@@ -8,13 +7,9 @@ class Cart(models.Model):
         on_delete=models.CASCADE, 
         related_name='cart'
     )
-    restaurant = models.ForeignKey(
-        Restaurant, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True,
-        related_name='carts'
-    )
+    # Changed from ForeignKey to IntegerField to avoid dependency
+    restaurant_id = models.IntegerField(null=True, blank=True)
+    restaurant_name = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -36,7 +31,10 @@ class Cart(models.Model):
 
 class CartItem(models.Model):
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
-    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE)
+    # Changed from ForeignKey to simple fields
+    menu_item_id = models.IntegerField()
+    menu_item_name = models.CharField(max_length=255)
+    menu_item_price = models.DecimalField(max_digits=10, decimal_places=2)
     quantity = models.PositiveIntegerField(default=1)
     customization = models.JSONField(default=dict, blank=True)
     special_instructions = models.TextField(blank=True, default='')
@@ -44,10 +42,10 @@ class CartItem(models.Model):
 
     @property
     def total(self):
-        return self.menu_item.price * self.quantity
+        return self.menu_item_price * self.quantity
 
     def __str__(self):
-        base = f"{self.quantity} x {self.menu_item.name}"
+        base = f"{self.quantity} x {self.menu_item_name}"
         if self.customization:
             cust_str = ', '.join([f"{k}: {v}" for k, v in self.customization.items()])
             return f"{base} ({cust_str})"
@@ -56,7 +54,6 @@ class CartItem(models.Model):
     class Meta:
         verbose_name = 'Cart Item'
         verbose_name_plural = 'Cart Items'
-        unique_together = ['cart', 'menu_item', 'customization']
 
 
 class Order(models.Model):
@@ -75,11 +72,9 @@ class Order(models.Model):
         on_delete=models.CASCADE, 
         related_name='orders'
     )
-    restaurant = models.ForeignKey(
-        Restaurant, 
-        on_delete=models.CASCADE, 
-        related_name='orders'
-    )
+    # Changed from ForeignKey to simple fields
+    restaurant_id = models.IntegerField()
+    restaurant_name = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     delivery_address = models.TextField(blank=True, default='')
@@ -98,9 +93,12 @@ class Order(models.Model):
 
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
-    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE)
+    # Changed from ForeignKey to simple fields
+    menu_item_id = models.IntegerField()
+    menu_item_name = models.CharField(max_length=255)
+    menu_item_price = models.DecimalField(max_digits=10, decimal_places=2)
     quantity = models.PositiveIntegerField()
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2)  # Price at time of order
     customization = models.JSONField(default=dict, blank=True)
     special_instructions = models.TextField(blank=True, default='')
 
@@ -110,7 +108,7 @@ class OrderItem(models.Model):
 
     @property
     def display_name(self):
-        base = self.menu_item.name
+        base = self.menu_item_name
         if self.customization:
             if 'relish' in self.customization:
                 return f"{base} with {self.customization['relish']}"
@@ -119,7 +117,7 @@ class OrderItem(models.Model):
         return base
 
     def __str__(self):
-        base = f"{self.quantity} x {self.menu_item.name}"
+        base = f"{self.quantity} x {self.menu_item_name}"
         if self.customization:
             cust_str = ', '.join([f"{k}: {v}" for k, v in self.customization.items()])
             return f"{base} ({cust_str})"
