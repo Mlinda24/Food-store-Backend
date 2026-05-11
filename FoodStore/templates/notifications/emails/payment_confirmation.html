@@ -1,0 +1,16 @@
+{% extends "notifications/emails/base.html" %}
+
+{% block title %}Payment Confirmation{% endblock %}
+
+{% block content %}
+<h2>Payment Confirmed!</h2>
+
+<p>Dear {{ user.username }},</p>
+
+<p>Your payment of <strong>${{ payment.amount }}</strong> has been confirmed.</p>
+
+<p>Transaction ID: {{ payment.transaction_id }}</p>
+<p>Payment Method: {{ payment.method }}</p>
+
+<a href="{{ site_url }}/orders/{{ payment.order.id }}" class="button">View Order</a>
+{% endblock %}

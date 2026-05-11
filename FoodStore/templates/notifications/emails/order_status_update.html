@@ -1,0 +1,14 @@
+{% extends "notifications/emails/base.html" %}
+
+{% block title %}Order Status Update{% endblock %}
+
+{% block content %}
+<h2>Order Status Update</h2>
+
+<p>Dear {{ user.username }},</p>
+
+<p>Your order <strong>#{{ order.id }}</strong> status has changed from 
+<strong>{{ old_status }}</strong> to <strong>{{ new_status }}</strong>.</p>
+
+<a href="{{ site_url }}/orders/{{ order.id }}" class="button">Track Order</a>
+{% endblock %}
