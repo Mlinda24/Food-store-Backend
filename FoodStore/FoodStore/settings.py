@@ -24,7 +24,16 @@ INSTALLED_APPS = [
     #'restaurants',
     'orders',
     'drf_yasg',
+    'payments',
 ]
+
+
+#paychangu integration
+PAYCHANGU_PULIC_KEY = 'pub-test-LmfcsVz5qQVD4l4HJMv3K1hARQ6ZdVpr'
+PAYCHANGU_SECRET_KEY = 'sec-test-klpHYUYiurs7rchdsgn4hQlNN1JT42Ql'
+PAYCHANGU_BASE_URL = 'https://sandbox.paychangu.com'  
+
+
 
 #AUTH_USER_MODEL = 'accounts.User'
 
