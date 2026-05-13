@@ -6,7 +6,13 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Sum
 from .models import Cart, CartItem, Order, OrderItem
 from .serializers import CartSerializer, OrderSerializer
-from restaurants.models import MenuItem, Restaurant
+
+# Try to import from restaurants
+try:
+    from restaurants.models import MenuItem, Restaurant
+    RESTAURANTS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    RESTAURANTS_AVAILABLE = False
 
 class CartViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -34,27 +40,40 @@ class CartViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        menu_item = get_object_or_404(MenuItem, id=menu_item_id)
+        if RESTAURANTS_AVAILABLE:
+            menu_item = get_object_or_404(MenuItem, id=menu_item_id)
+            
+            if not cart.restaurant:
+                cart.restaurant = menu_item.restaurant
+                cart.save()
 
-        if not cart.restaurant:
-            cart.restaurant = menu_item.restaurant
-            cart.save()
-
-        if cart.restaurant and cart.restaurant.id != menu_item.restaurant.id:
-            return Response(
-                {'error': 'Cannot add items from different restaurants'},
-                status=status.HTTP_400_BAD_REQUEST
+            if cart.restaurant and cart.restaurant.id != menu_item.restaurant.id:
+                return Response(
+                    {'error': 'Cannot add items from different restaurants'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            cart_item, created = CartItem.objects.get_or_create(
+                cart=cart,
+                menu_item=menu_item,
+                customization=customization,
+                defaults={
+                    'quantity': quantity,
+                    'special_instructions': special_instructions
+                }
             )
-
-        cart_item, created = CartItem.objects.get_or_create(
-            cart=cart,
-            menu_item=menu_item,
-            customization=customization,
-            defaults={
-                'quantity': quantity,
-                'special_instructions': special_instructions
-            }
-        )
+        else:
+            # Fallback when restaurants app not available
+            menu_item_name = request.data.get('menu_item_name', 'Item')
+            cart_item, created = CartItem.objects.get_or_create(
+                cart=cart,
+                menu_item_id=menu_item_id,
+                customization=customization,
+                defaults={
+                    'quantity': quantity,
+                    'special_instructions': special_instructions
+                }
+            )
         
         if not created:
             cart_item.quantity += quantity
@@ -126,166 +145,100 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        print(f"📋 OrderViewSet.get_queryset - User: {user.username}, Role: {user.role}")
         
-        if user.role == 'restaurant':
+        if RESTAURANTS_AVAILABLE and hasattr(user, 'role') and user.role == 'restaurant':
             try:
                 restaurant = Restaurant.objects.get(owner=user)
-                print(f"   Restaurant found: {restaurant.name} (ID: {restaurant.id})")
-                queryset = Order.objects.filter(restaurant=restaurant).order_by('-created')
-                print(f"   Orders found: {queryset.count()}")
-                return queryset
+                return Order.objects.filter(restaurant=restaurant).order_by('-created')
             except Restaurant.DoesNotExist:
-                print("   No restaurant found for this user")
                 return Order.objects.none()
         
         # For customers, show their own orders
-        queryset = Order.objects.filter(customer=user).order_by('-created')
-        print(f"   Customer orders found: {queryset.count()}")
-        return queryset
-
-    def list(self, request, *args, **kwargs):
-        print("📋 OrderViewSet.list called")
-        queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
-        print(f"   Returning {len(serializer.data)} orders")
-        return Response(serializer.data)
-
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        return Response(serializer.data)
-
-    def partial_update(self, request, *args, **kwargs):
-        """Handle PATCH requests to update order status"""
-        print(f"📝 PATCH request received for order")
-        instance = self.get_object()
-        new_status = request.data.get('status')
-        
-        if new_status:
-            print(f"   Updating status to: {new_status}")
-            valid_statuses = ['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']
-            if new_status in valid_statuses:
-                instance.status = new_status
-                instance.save()
-                print(f"✅ Order #{instance.id} status updated to: {instance.status}")
-        
-        serializer = self.get_serializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(serializer.data)
+        return Order.objects.filter(customer=user).order_by('-created')
 
     def create(self, request, *args, **kwargs):
-        print("📝 Creating new order...")
-        print(f"   User: {request.user.username}")
-        
         try:
             cart = Cart.objects.get(user=request.user)
-            print(f"   Cart found: ID {cart.id}")
-            print(f"   Cart items: {cart.items.count()}")
-            print(f"   Cart restaurant: {cart.restaurant}")
         except Cart.DoesNotExist:
-            print("   Cart not found")
             return Response(
                 {'error': 'Cart not found'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if not cart.items.exists():
-            print("   Cart is empty")
             return Response(
                 {'error': 'Cart is empty'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if not cart.restaurant:
-            print("   No restaurant selected")
+        if RESTAURANTS_AVAILABLE and not cart.restaurant:
             return Response(
                 {'error': 'No restaurant selected'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         # Calculate total price
-        total_price = sum(item.menu_item.price * item.quantity for item in cart.items.all())
-        print(f"   Total price: {total_price}")
+        if RESTAURANTS_AVAILABLE:
+            total_price = sum(item.menu_item.price * item.quantity for item in cart.items.all())
+        else:
+            total_price = sum(item.menu_item_price * item.quantity for item in cart.items.all())
 
-        # Get delivery address from request
         delivery_address = request.data.get('delivery_address', '')
         if not delivery_address:
-            print("   No delivery address provided")
             return Response(
                 {'error': 'Delivery address is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        print(f"   Delivery address: {delivery_address}")
 
         # Create order
-        order = Order.objects.create(
-            customer=request.user,
-            restaurant=cart.restaurant,
-            total_price=total_price,
-            delivery_address=delivery_address,
-            note=request.data.get('note', ''),
-            status='pending'
-        )
-        print(f"   Order created: #{order.id}")
+        order_data = {
+            'customer': request.user,
+            'total_price': total_price,
+            'delivery_address': delivery_address,
+            'note': request.data.get('note', ''),
+        }
+        
+        if RESTAURANTS_AVAILABLE:
+            order_data['restaurant'] = cart.restaurant
+        
+        order = Order.objects.create(**order_data)
 
         # Create order items from cart items
-        item_count = 0
         for cart_item in cart.items.all():
             OrderItem.objects.create(
                 order=order,
-                menu_item=cart_item.menu_item,
+                menu_item=cart_item.menu_item if RESTAURANTS_AVAILABLE else None,
+                menu_item_id=cart_item.menu_item_id,
+                menu_item_name=cart_item.menu_item_name if hasattr(cart_item, 'menu_item_name') else f"Item {cart_item.menu_item_id}",
                 quantity=cart_item.quantity,
-                price=cart_item.menu_item.price,
+                price=cart_item.menu_item_price if hasattr(cart_item, 'menu_item_price') else 0,
                 customization=cart_item.customization,
                 special_instructions=cart_item.special_instructions
             )
-            item_count += 1
-            print(f"   Added item: {cart_item.quantity} x {cart_item.menu_item.name}")
-        
-        print(f"   Total items added: {item_count}")
 
-        # Clear the cart after successful order
+        # Clear the cart
         cart.items.all().delete()
-        cart.restaurant = None
-        cart.save()
-        print("   Cart cleared")
+        if RESTAURANTS_AVAILABLE:
+            cart.restaurant = None
+            cart.save()
 
         serializer = self.get_serializer(order)
-        print(f"✅ Order created successfully: #{order.id}")
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['patch'])
     def update_status(self, request, pk=None):
-        """Custom action to update order status"""
-        try:
-            order = self.get_object()
-            new_status = request.data.get('status')
-            
-            print(f"📝 Updating order #{order.id} status from '{order.status}' to '{new_status}'")
-            
-            valid_statuses = ['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']
-            if new_status not in valid_statuses:
-                return Response(
-                    {'error': f'Invalid status. Must be one of: {valid_statuses}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Update the status
-            order.status = new_status
-            order.save(update_fields=['status'])
-            
-            # Refresh to verify
-            order.refresh_from_db()
-            print(f"✅ Order #{order.id} status is now: {order.status}")
-            
-            serializer = self.get_serializer(order)
-            return Response(serializer.data)
-            
-        except Exception as e:
-            print(f"❌ Error updating order status: {e}")
+        order = self.get_object()
+        new_status = request.data.get('status')
+        
+        valid_statuses = ['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']
+        if new_status not in valid_statuses:
             return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': f'Invalid status. Must be one of: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
             )
+        
+        order.status = new_status
+        order.save()
+        
+        serializer = self.get_serializer(order)
+        return Response(serializer.data)
