@@ -1,7 +1,5 @@
 from pathlib import Path
 import os
-import dj_database_url
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -22,22 +20,14 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
 
-    #'accounts',
-    #'restaurants',
-    'orders',
+    'accounts',
+    'restaurants',
+    'notifications',
+    #'orders',
     'drf_yasg',
-    'payments',
 ]
 
-
-#paychangu integration
-PAYCHANGU_PULIC_KEY = 'pub-test-LmfcsVz5qQVD4l4HJMv3K1hARQ6ZdVpr'
-PAYCHANGU_SECRET_KEY = 'sec-test-klpHYUYiurs7rchdsgn4hQlNN1JT42Ql'
-PAYCHANGU_BASE_URL = 'https://sandbox.paychangu.com'  
-
-
-
-#AUTH_USER_MODEL = 'accounts.User'
+AUTH_USER_MODEL = 'accounts.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

@@ -11,7 +11,7 @@ from .serializers import (
     RestaurantSerializer, MenuItemSerializer, MenuItemPublicSerializer, 
     CategorySerializer
 )
-from orders.models import Order
+#from orders.models import Order
 
 # ------------------------------
 # Restaurant ViewSet
