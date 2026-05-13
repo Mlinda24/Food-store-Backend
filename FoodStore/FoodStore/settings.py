@@ -32,13 +32,13 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',
     'drf_yasg',
-    'whitenoise.runserver_nostatic',  # For static files in production
+    'whitenoise.runserver_nostatic',
     
     # Local apps
     'accounts',
     'restaurants',
     'orders',
-    'payments',  # Added payments app
+    'payments',
 ]
 
 # Custom user model
@@ -53,8 +53,6 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
-    # Remove or comment out the DEFAULT_SCHEMA_CLASS line
-    # 'DEFAULT_SCHEMA_CLASS': 'rest_framework.schemas.coreapi.AutoSchema',
 }
 
 # JWT Settings
@@ -66,11 +64,11 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# Middleware (WhiteNoise must be after SecurityMiddleware)
+# Middleware
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',  # For static files
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -79,7 +77,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# CORS settings (production safe)
+# CORS settings
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
@@ -114,13 +112,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'FoodStore.wsgi.application'
 
-# Database (with PostgreSQL support for Render)
+# Database - PostgreSQL for production, SQLite for local development
 import dj_database_url
 
 DATABASES = {
     'default': dj_database_url.config(
         default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
-        conn_max_age=600
+        conn_max_age=600,
+        ssl_require=False  # Set to True if Render requires SSL
     )
 }
 
@@ -138,13 +137,13 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
-# Static files (CSS, JavaScript, Images)
+# Static files
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# Media files (user uploads)
+# Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
