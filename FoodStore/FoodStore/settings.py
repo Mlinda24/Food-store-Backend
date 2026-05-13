@@ -23,7 +23,7 @@ INSTALLED_APPS = [
     'accounts',
     'restaurants',
     'notifications',
-    #'orders',
+    'orders',
     'drf_yasg',
 ]
 
