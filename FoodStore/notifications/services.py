@@ -107,6 +107,25 @@ class EmailService:
             context=context,
             notification_type='payment_confirmation'
         )
+    
+    @staticmethod
+    def send_test_email(user, test_message="Test message"):
+        """Send a simple test email to verify email configuration"""
+        from django.utils import timezone
+        
+        context = {
+            'user': user,
+            'test_message': test_message,
+            'timestamp': timezone.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        return EmailService.send_email(
+            recipient=user.email,
+            subject="Food Store Test Email",
+            template_name='test_email',
+            context=context,
+            notification_type='test'
+        )
 
 
 class SMSService:
@@ -239,5 +258,6 @@ class NotificationService:
             )
         
         return notification
+
 
 from django.utils import timezone

@@ -98,7 +98,7 @@ ROOT_URLCONF = 'FoodStore.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],  # ← ADD THIS
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -159,6 +159,19 @@ PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://sandbox.paych
 # Webhook Configuration
 WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'http://localhost:8000')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'foodstore_webhook_secret_2024')
+
+# ============ EMAIL CONFIGURATION ============
+# settings.py
+
+# Email Configuration
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+SITE_URL = os.environ.get('SITE_URL', 'http://localhost:8000')
 
 # Security settings for production
 if not DEBUG:
