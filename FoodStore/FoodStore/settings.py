@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'restaurants',
     'orders',
     'payments',
+    'notifications',
 ]
 
 # Custom user model
