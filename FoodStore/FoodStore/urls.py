@@ -29,7 +29,7 @@ urlpatterns = [
 
     # App endpoints
     path('api/', include('restaurants.urls')),
-    #path('api/orders/', include('orders.urls')),
+    path('api/orders/', include('orders.urls')),
     path('api/', include('payments.urls')),
     # DRF login
     path('api-auth/', include('rest_framework.urls')),
