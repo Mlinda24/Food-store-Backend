@@ -43,7 +43,7 @@ class CartViewSet(viewsets.ViewSet):
             menu_item = get_object_or_404(MenuItem, id=menu_item_id)
 
             if not cart.restaurant_id:
-                cart.restaurant = menu_item.restaurant
+                cart.restaurant_id = menu_item.restaurant.id  # ← fixed
                 cart.save()
 
             if cart.restaurant_id and cart.restaurant_id != menu_item.restaurant.id:
@@ -54,7 +54,7 @@ class CartViewSet(viewsets.ViewSet):
 
             cart_item, created = CartItem.objects.get_or_create(
                 cart=cart,
-                menu_item_id=menu_item.id,       # ← plain id field
+                menu_item_id=menu_item.id,
                 customization=customization,
                 defaults={
                     'quantity': quantity,
@@ -179,16 +179,10 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if RESTAURANTS_AVAILABLE:
-            total_price = sum(
-                item.menu_item_price * item.quantity
-                for item in cart.items.all()
-            )
-        else:
-            total_price = sum(
-                item.menu_item_price * item.quantity
-                for item in cart.items.all()
-            )
+        total_price = sum(
+            item.menu_item_price * item.quantity
+            for item in cart.items.all()
+        )
 
         delivery_address = request.data.get('delivery_address', '')
         if not delivery_address:
@@ -222,9 +216,8 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
         cart.items.all().delete()
-        if RESTAURANTS_AVAILABLE:
-            cart.restaurant_id = None
-            cart.save()
+        cart.restaurant_id = None
+        cart.save()
 
         serializer = self.get_serializer(order)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
