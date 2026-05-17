@@ -42,7 +42,6 @@ class CartViewSet(viewsets.ViewSet):
         if RESTAURANTS_AVAILABLE:
             menu_item = get_object_or_404(MenuItem, id=menu_item_id)
 
-            # Use restaurant_id for comparison (avoids extra DB query)
             if not cart.restaurant_id:
                 cart.restaurant = menu_item.restaurant
                 cart.save()
@@ -55,11 +54,13 @@ class CartViewSet(viewsets.ViewSet):
 
             cart_item, created = CartItem.objects.get_or_create(
                 cart=cart,
-                menu_item=menu_item,
+                menu_item_id=menu_item.id,       # ← plain id field
                 customization=customization,
                 defaults={
                     'quantity': quantity,
-                    'special_instructions': special_instructions
+                    'menu_item_name': menu_item.name,
+                    'menu_item_price': menu_item.price,
+                    'special_instructions': special_instructions,
                 }
             )
         else:
@@ -69,7 +70,9 @@ class CartViewSet(viewsets.ViewSet):
                 customization=customization,
                 defaults={
                     'quantity': quantity,
-                    'special_instructions': special_instructions
+                    'menu_item_name': f'Item {menu_item_id}',
+                    'menu_item_price': 0,
+                    'special_instructions': special_instructions,
                 }
             )
 
@@ -178,8 +181,8 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         if RESTAURANTS_AVAILABLE:
             total_price = sum(
-                item.menu_item.price * item.quantity
-                for item in cart.items.select_related('menu_item')
+                item.menu_item_price * item.quantity
+                for item in cart.items.all()
             )
         else:
             total_price = sum(
@@ -209,19 +212,11 @@ class OrderViewSet(viewsets.ModelViewSet):
         for cart_item in cart.items.all():
             OrderItem.objects.create(
                 order=order,
-                menu_item=cart_item.menu_item if RESTAURANTS_AVAILABLE else None,
                 menu_item_id=cart_item.menu_item_id,
-                menu_item_name=(
-                    cart_item.menu_item.name
-                    if RESTAURANTS_AVAILABLE
-                    else f"Item {cart_item.menu_item_id}"
-                ),
+                menu_item_name=cart_item.menu_item_name,
+                menu_item_price=cart_item.menu_item_price,
                 quantity=cart_item.quantity,
-                price=(
-                    cart_item.menu_item.price
-                    if RESTAURANTS_AVAILABLE
-                    else 0
-                ),
+                price=cart_item.menu_item_price * cart_item.quantity,
                 customization=cart_item.customization,
                 special_instructions=cart_item.special_instructions
             )
