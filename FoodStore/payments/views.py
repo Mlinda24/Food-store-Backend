@@ -22,12 +22,17 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
+# Maps our internal method name to the operator string PayChangu expects
+PAYCHANGU_OPERATOR_MAP = {
+    'mpamba': 'tnm',
+    'airtel_money': 'airtel',
+}
+
 
 class PaymentViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, pk):
-        """Helper to get payment object"""
         try:
             return Payment.objects.get(pk=pk)
         except Payment.DoesNotExist:
@@ -38,7 +43,7 @@ class PaymentViewSet(viewsets.ViewSet):
     # ------------------------------------------------------------------
     @action(detail=False, methods=['post'])
     def initiate(self, request):
-        """Initiate a payment with PayChangu"""
+        """Initiate a mobile money payment with PayChangu"""
         serializer = InitiatePaymentSerializer(
             data=request.data, context={'request': request}
         )
@@ -46,8 +51,8 @@ class PaymentViewSet(viewsets.ViewSet):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         order_id = serializer.validated_data['order_id']
-        method = serializer.validated_data['method']
-        phone = serializer.validated_data.get('phone_number', '')
+        method = serializer.validated_data['method']          # 'mpamba' or 'airtel_money'
+        phone = serializer.validated_data['phone_number']
 
         try:
             order = Order.objects.get(id=order_id, customer=request.user)
@@ -81,6 +86,7 @@ class PaymentViewSet(viewsets.ViewSet):
         )
 
         # Build PayChangu payload
+        operator = PAYCHANGU_OPERATOR_MAP[method]
         paychangu_data = {
             'amount': str(order.total_price),
             'currency': 'MWK',
@@ -88,14 +94,12 @@ class PaymentViewSet(viewsets.ViewSet):
             'first_name': getattr(request.user, 'first_name', '') or 'Customer',
             'last_name': getattr(request.user, 'last_name', '') or 'User',
             'reference': reference,
+            'phone_number': phone,
+            'mobile_money_operator': operator,
             'callback_url': f"{settings.WEBHOOK_BASE_URL}/api/paychangu/webhook/",
             'return_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}",
             'cancel_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true",
         }
-
-        if phone and method in ['mpesa', 'airtel_money']:
-            paychangu_data['phone_number'] = phone
-            paychangu_data['mobile_money_operator'] = method
 
         headers = {
             'Authorization': f'Bearer {settings.PAYCHANGU_SECRET_KEY}',
@@ -103,7 +107,10 @@ class PaymentViewSet(viewsets.ViewSet):
             'Accept': 'application/json',
         }
 
-        logger.info(f"Initiating PayChangu payment: reference={reference}, amount={order.total_price}")
+        logger.info(
+            f"Initiating PayChangu payment: reference={reference}, "
+            f"method={method}, operator={operator}, amount={order.total_price}"
+        )
 
         try:
             response = requests.post(
@@ -118,8 +125,6 @@ class PaymentViewSet(viewsets.ViewSet):
 
             if response.status_code in (200, 201):
                 response_data = response.json()
-
-                # PayChangu returns data nested under 'data' key
                 data = response_data.get('data', response_data)
 
                 payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
@@ -139,18 +144,25 @@ class PaymentViewSet(viewsets.ViewSet):
                         'reference': reference,
                         'checkout_url': checkout_url,
                         'amount': str(order.total_price),
+                        'formatted_amount': f"MK{order.total_price:,.2f}",
                         'currency': 'MWK',
+                        'method': method,
                         'status': payment.status,
-                        'message': 'Payment initiated successfully. Redirect user to checkout_url.',
+                        'message': 'Payment initiated. Redirect the user to checkout_url to complete payment.',
                     },
                     status=status.HTTP_200_OK,
                 )
             else:
                 payment.status = 'failed'
-                payment.payment_details = {'error': response.text, 'status_code': response.status_code}
+                payment.payment_details = {
+                    'error': response.text,
+                    'status_code': response.status_code,
+                }
                 payment.save()
 
-                logger.error(f"PayChangu initiation failed: {response.status_code} - {response.text}")
+                logger.error(
+                    f"PayChangu initiation failed: {response.status_code} - {response.text}"
+                )
 
                 return Response(
                     {
@@ -187,7 +199,10 @@ class PaymentViewSet(viewsets.ViewSet):
         raw_body = request.body
 
         # Verify HMAC signature
-        signature = request.headers.get('X-Webhook-Signature') or request.headers.get('X-Paychangu-Signature')
+        signature = (
+            request.headers.get('X-Webhook-Signature')
+            or request.headers.get('X-Paychangu-Signature')
+        )
         print(f"Received signature: {signature}")
 
         if settings.PAYCHANGU_WEBHOOK_SECRET and signature:
@@ -217,7 +232,6 @@ class PaymentViewSet(viewsets.ViewSet):
 
         print(f"Webhook payload: {json.dumps(data, indent=2)}")
 
-        # PayChangu may nest event data
         event_data = data.get('data', data)
 
         reference = (
@@ -226,17 +240,13 @@ class PaymentViewSet(viewsets.ViewSet):
             or data.get('reference')
             or data.get('tx_ref')
         )
-        payment_status = (
-            event_data.get('status')
-            or data.get('status')
-        )
+        payment_status = event_data.get('status') or data.get('status')
         transaction_id = (
             event_data.get('transaction_id')
             or event_data.get('id')
             or data.get('transaction_id')
         )
 
-        # Log webhook
         webhook_log = WebhookLog.objects.create(
             reference=reference or 'unknown',
             payload=data,
@@ -248,7 +258,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 payment = Payment.objects.get(reference=reference)
                 print(f"Found payment: ID={payment.id}, Order={payment.order.id}")
 
-                if payment_status == 'completed' or payment_status == 'successful':
+                if payment_status in ('completed', 'successful'):
                     payment.status = 'completed'
                     payment.transaction_id = transaction_id
                     payment.payment_details = data
@@ -261,14 +271,16 @@ class PaymentViewSet(viewsets.ViewSet):
                     logger.info(f"Payment completed: reference={reference}, order={order.id}")
                     print(f"Payment completed. Order #{order.id} status -> confirmed")
 
-                    # Send notification (wrapped so webhook never fails due to email errors)
                     try:
                         from notifications.services import NotificationService
                         NotificationService.send_notification(
                             user=order.customer,
                             notification_type='payment',
                             title='Payment Successful',
-                            message=f'Your payment of MK{payment.amount:,.2f} for Order #{order.id} was successful.',
+                            message=(
+                                f'Your payment of MK{payment.amount:,.2f} '
+                                f'for Order #{order.id} was successful.'
+                            ),
                             data={
                                 'id': str(order.id),
                                 'transaction_id': str(transaction_id or ''),
@@ -389,7 +401,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 return Response(
                     {
                         'status': payment.status,
-                        'message': 'Unable to verify payment status',
+                        'message': 'Unable to verify with PayChangu',
                         'reference': reference,
                     },
                     status=status.HTTP_200_OK,
@@ -412,7 +424,6 @@ class PaymentViewSet(viewsets.ViewSet):
     # ------------------------------------------------------------------
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
-        """Get payment status by payment ID"""
         payment = self.get_object(pk)
         if not payment:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -424,14 +435,16 @@ class PaymentViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
     # ------------------------------------------------------------------
-    # STATUS BY REFERENCE  (useful for return_url landing page)
+    # STATUS BY REFERENCE
     # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def status_by_reference(self, request):
-        """Get payment status by reference query param: /payments/status_by_reference/?reference=FOOD-1-ABC"""
         reference = request.query_params.get('reference')
         if not reference:
-            return Response({'error': 'reference query param required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'reference query param required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             payment = Payment.objects.get(reference=reference)
@@ -449,6 +462,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 'amount': str(payment.amount),
                 'formatted_amount': f"MK{payment.amount:,.2f}",
                 'method': payment.method,
+                'method_display': payment.get_method_display(),
                 'order_id': payment.order.id,
                 'transaction_id': payment.transaction_id,
             }
@@ -459,7 +473,6 @@ class PaymentViewSet(viewsets.ViewSet):
     # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def my_payments(self, request):
-        """Get all payments for the authenticated user"""
         payments = Payment.objects.filter(
             order__customer=request.user
         ).order_by('-created_at')
@@ -470,7 +483,6 @@ class PaymentViewSet(viewsets.ViewSet):
     # LIST / RETRIEVE
     # ------------------------------------------------------------------
     def list(self, request):
-        """List payments — all for staff, own for regular users"""
         if request.user.is_staff:
             payments = Payment.objects.all()
         else:
@@ -481,7 +493,6 @@ class PaymentViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
     def retrieve(self, request, pk=None):
-        """Get a specific payment"""
         payment = self.get_object(pk)
         if not payment:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)

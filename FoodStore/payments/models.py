@@ -12,15 +12,14 @@ class Payment(models.Model):
     ]
     
     METHOD_CHOICES = [
-        ('mpesa', 'M-Pesa'),
+        ('mpamba', 'TNM Mpamba'),
         ('airtel_money', 'Airtel Money'),
-        ('card', 'Card Payment'),
     ]
     
     order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name='payment')
     transaction_id = models.CharField(max_length=255, blank=True, null=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
-    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default='mpesa')
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default='mpamba')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     reference = models.CharField(max_length=100, unique=True)
     phone_number = models.CharField(max_length=20, blank=True)

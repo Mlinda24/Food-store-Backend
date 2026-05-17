@@ -6,50 +6,49 @@ from orders.models import Order
 class PaymentSerializer(serializers.ModelSerializer):
     """Serializer for Payment model"""
     order_total = serializers.DecimalField(
-        source='order.total_price', 
-        read_only=True, 
-        max_digits=10, 
+        source='order.total_price',
+        read_only=True,
+        max_digits=10,
         decimal_places=2
     )
     order_customer_name = serializers.CharField(
-        source='order.customer.username', 
+        source='order.customer.username',
         read_only=True
     )
     formatted_amount = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     method_display = serializers.CharField(source='get_method_display', read_only=True)
-    
+
     class Meta:
         model = Payment
         fields = [
-            'id', 
-            'order', 
+            'id',
+            'order',
             'order_total',
             'order_customer_name',
-            'transaction_id', 
+            'transaction_id',
             'amount',
             'formatted_amount',
             'method',
             'method_display',
             'status',
             'status_display',
-            'reference', 
-            'phone_number', 
-            'payment_details', 
+            'reference',
+            'phone_number',
+            'payment_details',
             'created_at',
             'updated_at'
         ]
         read_only_fields = [
-            'id', 
-            'transaction_id', 
-            'reference', 
-            'payment_details', 
+            'id',
+            'transaction_id',
+            'reference',
+            'payment_details',
             'created_at',
             'updated_at'
         ]
-    
+
     def get_formatted_amount(self, obj):
-        """Format amount with currency"""
         return f"MK{obj.amount:,.2f}"
 
 
@@ -59,32 +58,31 @@ class PaymentDetailSerializer(serializers.ModelSerializer):
     formatted_amount = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     method_display = serializers.CharField(source='get_method_display', read_only=True)
-    
+
     class Meta:
         model = Payment
         fields = [
-            'id', 
+            'id',
             'order',
-            'transaction_id', 
+            'transaction_id',
             'amount',
             'formatted_amount',
             'method',
             'method_display',
             'status',
             'status_display',
-            'reference', 
-            'phone_number', 
-            'payment_details', 
+            'reference',
+            'phone_number',
+            'payment_details',
             'created_at',
             'updated_at'
         ]
         read_only_fields = '__all__'
-    
+
     def get_order(self, obj):
-        """Return order details"""
         from orders.serializers import OrderSerializer
         return OrderSerializer(obj.order).data
-    
+
     def get_formatted_amount(self, obj):
         return f"MK{obj.amount:,.2f}"
 
@@ -96,19 +94,17 @@ class InitiatePaymentSerializer(serializers.Serializer):
         help_text="ID of the order to pay for"
     )
     method = serializers.ChoiceField(
-        choices=['mpesa', 'airtel_money', 'card'],
+        choices=['mpamba', 'airtel_money'],
         required=True,
-        help_text="Payment method: mpesa, airtel_money, or card"
+        help_text="Payment method: mpamba or airtel_money"
     )
     phone_number = serializers.CharField(
         max_length=20,
-        required=False,
-        allow_blank=True,
-        help_text="Phone number for mobile money payments (e.g., 0999123456)"
+        required=True,
+        help_text="Phone number for mobile money payment (e.g., 0999123456)"
     )
-    
+
     def validate_order_id(self, value):
-        """Validate that order exists and belongs to the user"""
         try:
             order = Order.objects.get(id=value)
             request = self.context.get('request')
@@ -121,16 +117,14 @@ class InitiatePaymentSerializer(serializers.Serializer):
         except Order.DoesNotExist:
             raise serializers.ValidationError(f"Order with id {value} does not exist")
         return value
-    
+
     def validate_phone_number(self, value):
-        """Validate phone number format for mobile money"""
-        method = self.initial_data.get('method')
-        if method in ['mpesa', 'airtel_money'] and not value:
-            raise serializers.ValidationError(
-                f"Phone number is required for {method} payment"
-            )
-        if value and not value.isdigit():
+        if not value:
+            raise serializers.ValidationError("Phone number is required for mobile money payment")
+        if not value.isdigit():
             raise serializers.ValidationError("Phone number must contain only digits")
+        if len(value) not in (9, 10):
+            raise serializers.ValidationError("Phone number must be 9 or 10 digits")
         return value
 
 
@@ -141,9 +135,8 @@ class VerifyPaymentSerializer(serializers.Serializer):
         max_length=100,
         help_text="Payment reference to verify"
     )
-    
+
     def validate_reference(self, value):
-        """Validate that payment exists"""
         try:
             payment = Payment.objects.get(reference=value)
             request = self.context.get('request')
@@ -160,9 +153,8 @@ class PaymentStatusSerializer(serializers.Serializer):
     status = serializers.CharField()
     amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     message = serializers.CharField(required=False)
-    
+
     def to_representation(self, instance):
-        """Custom representation for payment status"""
         return {
             'reference': instance.reference,
             'status': instance.status,
@@ -170,6 +162,7 @@ class PaymentStatusSerializer(serializers.Serializer):
             'amount': str(instance.amount),
             'formatted_amount': f"MK{instance.amount:,.2f}",
             'method': instance.method,
+            'method_display': instance.get_method_display(),
             'message': f"Payment is {instance.status}"
         }
 
@@ -177,12 +170,12 @@ class PaymentStatusSerializer(serializers.Serializer):
 class WebhookLogSerializer(serializers.ModelSerializer):
     """Serializer for WebhookLog model"""
     formatted_received_at = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = WebhookLog
         fields = ['id', 'reference', 'payload', 'received_at', 'formatted_received_at']
         read_only_fields = '__all__'
-    
+
     def get_formatted_received_at(self, obj):
         return obj.received_at.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -195,7 +188,7 @@ class PaymentSummarySerializer(serializers.Serializer):
     pending_payments = serializers.IntegerField()
     failed_payments = serializers.IntegerField()
     payments_by_method = serializers.DictField()
-    
+
     def to_representation(self, instance):
         return {
             'total_payments': instance['total_payments'],
