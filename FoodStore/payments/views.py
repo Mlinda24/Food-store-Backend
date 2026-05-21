@@ -1,12 +1,17 @@
+# payments/views.py - COMPLETE UPDATED VERSION
+
 import requests
 import uuid
 import hmac
 import hashlib
 import json
 import logging
+from decimal import Decimal
 from django.conf import settings
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from django.db import transaction as db_transaction
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -51,7 +56,7 @@ class PaymentViewSet(viewsets.ViewSet):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         order_id = serializer.validated_data['order_id']
-        method = serializer.validated_data['method']          # 'mpamba' or 'airtel_money'
+        method = serializer.validated_data['method']
         phone = serializer.validated_data['phone_number']
 
         try:
@@ -96,7 +101,7 @@ class PaymentViewSet(viewsets.ViewSet):
             'reference': reference,
             'phone_number': phone,
             'mobile_money_operator': operator,
-            'callback_url': f"{settings.WEBHOOK_BASE_URL}/api/paychangu/webhook/",
+            'callback_url': f"{settings.WEBHOOK_BASE_URL}/api/payments/webhook/",
             'return_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}",
             'cancel_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true",
         }
@@ -266,11 +271,35 @@ class PaymentViewSet(viewsets.ViewSet):
 
                     order = payment.order
                     order.status = 'confirmed'
+                    order.payment_status = 'paid'
+                    order.paid_at = timezone.now()
                     order.save()
 
                     logger.info(f"Payment completed: reference={reference}, order={order.id}")
                     print(f"Payment completed. Order #{order.id} status -> confirmed")
 
+                    # ========== NEW: Create escrow for the payment ==========
+                    try:
+                        from .services.escrow_service import EscrowService
+                        EscrowService.create_escrow(order, payment)
+                        print(f"Escrow created for Order #{order.id}")
+                    except Exception as escrow_err:
+                        logger.error(f"Failed to create escrow: {escrow_err}")
+                        print(f"Error creating escrow: {escrow_err}")
+
+                    # ========== NEW: Initialize wallet for customer if not exists ==========
+                    try:
+                        from .services.wallet_service import WalletDistributionService
+                        # Create wallet for customer if not exists
+                        WalletDistributionService.get_or_create_wallet(
+                            user=order.customer, 
+                            user_type='customer'
+                        )
+                        print(f"Wallet initialized for customer {order.customer.username}")
+                    except Exception as wallet_err:
+                        logger.error(f"Failed to initialize customer wallet: {wallet_err}")
+
+                    # Send notification
                     try:
                         from notifications.services import NotificationService
                         NotificationService.send_notification(
@@ -365,7 +394,17 @@ class PaymentViewSet(viewsets.ViewSet):
 
                     order = payment.order
                     order.status = 'confirmed'
+                    order.payment_status = 'paid'
+                    order.paid_at = timezone.now()
                     order.save()
+
+                    # Create escrow if not exists
+                    try:
+                        from .services.escrow_service import EscrowService
+                        if not hasattr(order, 'escrow'):
+                            EscrowService.create_escrow(order, payment)
+                    except Exception as escrow_err:
+                        logger.error(f"Failed to create escrow on verify: {escrow_err}")
 
                     return Response(
                         {
@@ -420,6 +459,226 @@ class PaymentViewSet(viewsets.ViewSet):
             )
 
     # ------------------------------------------------------------------
+    # DISTRIBUTE PAYMENT TO WALLETS (NEW ENDPOINT)
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['post'])
+    def distribute(self, request):
+        """
+        Manually distribute payment to wallets after delivery.
+        Normally this happens automatically, but this endpoint allows manual trigger.
+        """
+        reference = request.data.get('reference')
+        if not reference:
+            return Response(
+                {'error': 'reference is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            payment = Payment.objects.get(reference=reference)
+        except Payment.DoesNotExist:
+            return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Check permissions
+        order = payment.order
+        if order.customer != request.user and not request.user.is_staff:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Check if already distributed
+        if payment.distributed_to_wallets:
+            return Response(
+                {'message': 'Payment already distributed', 'distributed_at': payment.distributed_at},
+                status=status.HTTP_200_OK
+            )
+
+        # Check if order is delivered
+        if order.status != 'delivered':
+            return Response(
+                {'error': f'Order not delivered yet. Current status: {order.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Distribute to wallets
+        from .services.wallet_service import WalletDistributionService
+        
+        with db_transaction.atomic():
+            success = WalletDistributionService.distribute_to_wallets(payment)
+            
+            if success:
+                return Response(
+                    {
+                        'success': True,
+                        'message': 'Payment distributed to wallets successfully',
+                        'reference': reference,
+                        'distributed_at': payment.distributed_at
+                    },
+                    status=status.HTTP_200_OK
+                )
+            else:
+                return Response(
+                    {'error': 'Distribution failed. Check logs for details.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+    # ------------------------------------------------------------------
+    # GET WALLET BALANCE (NEW ENDPOINT)
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['get'])
+    def wallet_balance(self, request):
+        """Get current user's wallet balance"""
+        from orders.models import Wallet
+        
+        try:
+            wallet = Wallet.objects.get(user=request.user)
+            return Response({
+                'balance': str(wallet.balance),
+                'formatted_balance': f"MK{wallet.balance:,.2f}",
+                'user_type': wallet.user_type,
+                'total_earned': str(wallet.total_earned),
+                'total_withdrawn': str(wallet.total_withdrawn),
+                'currency': wallet.currency
+            })
+        except Wallet.DoesNotExist:
+            # Create wallet if doesn't exist
+            wallet = Wallet.objects.create(
+                user=request.user,
+                user_type='customer',
+                balance=Decimal('0')
+            )
+            return Response({
+                'balance': '0.00',
+                'formatted_balance': 'MK0.00',
+                'user_type': 'customer',
+                'total_earned': '0.00',
+                'total_withdrawn': '0.00',
+                'currency': 'MWK'
+            })
+
+    # ------------------------------------------------------------------
+    # GET TRANSACTION HISTORY (NEW ENDPOINT)
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['get'])
+    def transactions(self, request):
+        """Get user's transaction history"""
+        from orders.models import Transaction
+        
+        transactions = Transaction.objects.filter(
+            user=request.user
+        ).order_by('-created_at')[:50]  # Last 50 transactions
+        
+        data = []
+        for tx in transactions:
+            data.append({
+                'transaction_id': tx.transaction_id,
+                'amount': str(tx.amount),
+                'formatted_amount': f"MK{tx.amount:,.2f}",
+                'type': tx.transaction_type,
+                'status': tx.status,
+                'description': tx.description,
+                'created_at': tx.created_at.isoformat(),
+                'order_id': tx.order.id if tx.order else None
+            })
+        
+        return Response({
+            'transactions': data,
+            'total_count': transactions.count()
+        })
+
+    # ------------------------------------------------------------------
+    # REQUEST WITHDRAWAL (NEW ENDPOINT)
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['post'])
+    def withdraw(self, request):
+        """Request withdrawal from wallet to mobile money"""
+        from orders.models import Wallet, WithdrawalRequest
+        
+        amount = request.data.get('amount')
+        phone_number = request.data.get('phone_number')
+        provider = request.data.get('provider', 'mpamba')  # mpamba or airtel_money
+        
+        if not amount or not phone_number:
+            return Response(
+                {'error': 'amount and phone_number are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            amount = Decimal(str(amount))
+        except:
+            return Response(
+                {'error': 'Invalid amount'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user's wallet
+        try:
+            wallet = Wallet.objects.get(user=request.user)
+        except Wallet.DoesNotExist:
+            return Response(
+                {'error': 'No wallet found for this user'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check sufficient balance
+        if wallet.balance < amount:
+            return Response(
+                {'error': f'Insufficient balance. Available: MK{wallet.balance:,.2f}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check minimum withdrawal
+        min_withdrawal = Decimal('1000.00')
+        if amount < min_withdrawal:
+            return Response(
+                {'error': f'Minimum withdrawal amount is MK{min_withdrawal:,.2f}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create withdrawal request
+        withdrawal = WithdrawalRequest.objects.create(
+            user=request.user,
+            amount=amount,
+            phone_number=phone_number,
+            provider=provider,
+            status='pending'
+        )
+        
+        # Optionally: Deduct from wallet immediately or wait for processing
+        # We'll deduct immediately to prevent double spending
+        wallet.balance -= amount
+        wallet.total_withdrawn += amount
+        wallet.save()
+        
+        # Create transaction record
+        from orders.models import Transaction
+        Transaction.objects.create(
+            transaction_id=f"WTH-{uuid.uuid4().hex[:12].upper()}",
+            order=None,
+            user=request.user,
+            amount=amount,
+            transaction_type='withdrawal',
+            status='pending',
+            reference=withdrawal.reference if hasattr(withdrawal, 'reference') else None,
+            description=f'Withdrawal request to {phone_number} via {provider}',
+            balance_before=wallet.balance + amount,
+            balance_after=wallet.balance
+        )
+        
+        # TODO: Integrate with PayChangu withdrawal API here
+        # For now, just log it
+        logger.info(f"Withdrawal requested: User={request.user.id}, Amount={amount}, Phone={phone_number}")
+        
+        return Response({
+            'success': True,
+            'message': 'Withdrawal request submitted successfully',
+            'withdrawal_id': withdrawal.id,
+            'amount': str(amount),
+            'formatted_amount': f"MK{amount:,.2f}",
+            'status': 'pending',
+            'note': 'Your request is being processed. Funds will be sent to your mobile money within 24 hours.'
+        })
+
+    # ------------------------------------------------------------------
     # STATUS
     # ------------------------------------------------------------------
     @action(detail=True, methods=['get'])
@@ -465,6 +724,8 @@ class PaymentViewSet(viewsets.ViewSet):
                 'method_display': payment.get_method_display(),
                 'order_id': payment.order.id,
                 'transaction_id': payment.transaction_id,
+                'distributed_to_wallets': payment.distributed_to_wallets,
+                'distributed_at': payment.distributed_at,
             }
         )
 

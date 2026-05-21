@@ -1,3 +1,4 @@
+# FoodStore/urls.py
 from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
@@ -31,14 +32,15 @@ urlpatterns = [
     path('api/', include('restaurants.urls')),
     path('api/orders/', include('orders.urls')),
     path('api/', include('payments.urls')),
+    path('api/drivers/', include('drivers.urls')),  # Moved before api-auth
+    
     # DRF login
     path('api-auth/', include('rest_framework.urls')),
 
     # Swagger UI
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    #path('api/notifications/', include('notifications.urls')),
-
+    # path('api/notifications/', include('notifications.urls')),  # Uncomment when ready
 ]
 
 # Serve media and static files during development

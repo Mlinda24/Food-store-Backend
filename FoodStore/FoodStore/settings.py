@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'orders',
     'payments',
     'notifications',
+    'drivers',
 ]
 
 # Custom user model

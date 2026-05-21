@@ -26,6 +26,39 @@ class Payment(models.Model):
     payment_details = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+    distributed_to_wallets = models.BooleanField(
+        default=False,
+        help_text="Whether money has been distributed to wallets"
+    )
+    
+    distributed_at = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When money was sent to wallets"
+    )
+    
+    platform_fee = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="Platform fee taken from this payment"
+    )
+    
+    restaurant_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="Amount going to restaurant"
+    )
+    
+    driver_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="Amount going to driver"
+    )
     
     def __str__(self):
         return f"Payment {self.reference} - {self.status}"
@@ -34,6 +67,9 @@ class Payment(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Payment'
         verbose_name_plural = 'Payments'
+
+
+
 
 
 class WebhookLog(models.Model):
