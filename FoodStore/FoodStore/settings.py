@@ -6,13 +6,10 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-h#wrjagr910@-schj7+11&+wr*bw3$stg7)5334b^)h4wy^73j')
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
 # Production hosts
@@ -121,7 +118,7 @@ DATABASES = {
     'default': dj_database_url.config(
         default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
         conn_max_age=600,
-        ssl_require=False  # Set to True if Render requires SSL
+        ssl_require=False  
     )
 }
 
@@ -162,8 +159,6 @@ WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'http://localhost:8000')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'foodstore_webhook_secret_2024')
 
 # ============ EMAIL CONFIGURATION ============
-# settings.py
-
 # Email Configuration
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')

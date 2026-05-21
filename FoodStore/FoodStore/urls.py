@@ -7,7 +7,7 @@ from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 
-# Swagger schema setup
+#Swagger schema setup
 schema_view = get_schema_view(
     openapi.Info(
         title="Food Store API",
@@ -22,28 +22,16 @@ schema_view = get_schema_view(
 )
 
 urlpatterns = [
-    # Admin
     path('admin/', admin.site.urls),
-
-    # Auth endpoints
     path('api/auth/', include('accounts.urls')),
-
-    # App endpoints
     path('api/', include('restaurants.urls')),
     path('api/orders/', include('orders.urls')),
     path('api/', include('payments.urls')),
-    path('api/drivers/', include('drivers.urls')),  # Moved before api-auth
-    
-    # DRF login
+    path('api/drivers/', include('drivers.urls')),  
     path('api-auth/', include('rest_framework.urls')),
-
-    # Swagger UI
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    # path('api/notifications/', include('notifications.urls')),  # Uncomment when ready
 ]
-
-# Serve media and static files during development
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

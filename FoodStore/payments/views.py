@@ -43,9 +43,7 @@ class PaymentViewSet(viewsets.ViewSet):
         except Payment.DoesNotExist:
             return None
 
-    # ------------------------------------------------------------------
     # INITIATE PAYMENT
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['post'])
     def initiate(self, request):
         """Initiate a mobile money payment with PayChangu"""
@@ -190,9 +188,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # ------------------------------------------------------------------
     # WEBHOOK
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     @method_decorator(csrf_exempt)
     def webhook(self, request):
@@ -287,7 +283,6 @@ class PaymentViewSet(viewsets.ViewSet):
                         logger.error(f"Failed to create escrow: {escrow_err}")
                         print(f"Error creating escrow: {escrow_err}")
 
-                    # ========== NEW: Initialize wallet for customer if not exists ==========
                     try:
                         from .services.wallet_service import WalletDistributionService
                         # Create wallet for customer if not exists
@@ -351,9 +346,7 @@ class PaymentViewSet(viewsets.ViewSet):
         print("=" * 60 + "\n")
         return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
 
-    # ------------------------------------------------------------------
     # VERIFY
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['post'])
     def verify(self, request):
         """Verify payment status with PayChangu"""
@@ -458,9 +451,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_200_OK,
             )
 
-    # ------------------------------------------------------------------
     # DISTRIBUTE PAYMENT TO WALLETS (NEW ENDPOINT)
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['post'])
     def distribute(self, request):
         """
@@ -520,9 +511,7 @@ class PaymentViewSet(viewsets.ViewSet):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
-    # ------------------------------------------------------------------
     # GET WALLET BALANCE (NEW ENDPOINT)
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def wallet_balance(self, request):
         """Get current user's wallet balance"""
@@ -554,9 +543,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 'currency': 'MWK'
             })
 
-    # ------------------------------------------------------------------
     # GET TRANSACTION HISTORY (NEW ENDPOINT)
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def transactions(self, request):
         """Get user's transaction history"""
@@ -584,9 +571,7 @@ class PaymentViewSet(viewsets.ViewSet):
             'total_count': transactions.count()
         })
 
-    # ------------------------------------------------------------------
     # REQUEST WITHDRAWAL (NEW ENDPOINT)
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['post'])
     def withdraw(self, request):
         """Request withdrawal from wallet to mobile money"""
@@ -678,9 +663,7 @@ class PaymentViewSet(viewsets.ViewSet):
             'note': 'Your request is being processed. Funds will be sent to your mobile money within 24 hours.'
         })
 
-    # ------------------------------------------------------------------
     # STATUS
-    # ------------------------------------------------------------------
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
         payment = self.get_object(pk)
@@ -693,9 +676,7 @@ class PaymentViewSet(viewsets.ViewSet):
         serializer = PaymentStatusSerializer(payment)
         return Response(serializer.data)
 
-    # ------------------------------------------------------------------
     # STATUS BY REFERENCE
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def status_by_reference(self, request):
         reference = request.query_params.get('reference')
@@ -729,9 +710,7 @@ class PaymentViewSet(viewsets.ViewSet):
             }
         )
 
-    # ------------------------------------------------------------------
     # MY PAYMENTS
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def my_payments(self, request):
         payments = Payment.objects.filter(
@@ -740,9 +719,7 @@ class PaymentViewSet(viewsets.ViewSet):
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)
 
-    # ------------------------------------------------------------------
     # LIST / RETRIEVE
-    # ------------------------------------------------------------------
     def list(self, request):
         if request.user.is_staff:
             payments = Payment.objects.all()

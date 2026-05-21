@@ -246,23 +246,23 @@ class NotificationPreferenceAdmin(admin.ModelAdmin):
     user_link.admin_order_field = 'user__username'
     
     def email_enabled_icon(self, obj):
-        return '✅' if obj.email_enabled else '❌'
+        return ' ' if obj.email_enabled else ''
     email_enabled_icon.short_description = 'Email'
     
     def sms_enabled_icon(self, obj):
-        return '✅' if obj.sms_enabled else '❌'
+        return ' ' if obj.sms_enabled else ' '
     sms_enabled_icon.short_description = 'SMS'
     
     def push_enabled_icon(self, obj):
-        return '✅' if obj.push_enabled else '❌'
+        return ' ' if obj.push_enabled else ' '
     push_enabled_icon.short_description = 'Push'
     
     def order_updates_icon(self, obj):
-        return '✅' if obj.order_updates else '❌'
+        return ' ' if obj.order_updates else ' '
     order_updates_icon.short_description = 'Orders'
     
     def payment_alerts_icon(self, obj):
-        return '✅' if obj.payment_alerts else '❌'
+        return ' ' if obj.payment_alerts else ' '
     payment_alerts_icon.short_description = 'Payments'
     
     def updated_at_relative(self, obj):

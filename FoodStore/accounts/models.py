@@ -1,4 +1,3 @@
-# Create your models here.
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
@@ -18,7 +17,6 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=CUSTOMER)
     phone = models.CharField(max_length=20, blank=True, null=True)
     
-    # Add related_name to avoid conflicts with auth.User
     groups = models.ManyToManyField(
         'auth.Group',
         related_name='accounts_user_set',
