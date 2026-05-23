@@ -59,16 +59,17 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             current_year = now.year
 
             today_orders = Order.objects.filter(
-                restaurant=restaurant, created__date=today
+                restaurant_id=restaurant.id, created__date=today
             )
             monthly_orders = Order.objects.filter(
-                restaurant=restaurant,
+                restaurant_id=restaurant.id,
                 created__year=current_year,
                 created__month=current_month
             )
-            total_orders = Order.objects.filter(restaurant=restaurant)
+            total_orders = Order.objects.filter(restaurant_id=restaurant.id)
             active_orders = Order.objects.filter(
-                restaurant=restaurant, status__in=['pending', 'confirmed', 'preparing']
+                restaurant_id=restaurant.id,
+                status__in=['pending', 'confirmed', 'preparing']
             )
 
             stats = {
@@ -131,7 +132,7 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(data=data)
         if serializer.is_valid():
-            menu_item = serializer.save()
+            menu_item = serializer.save(restaurant=restaurant)
             print(f"✅ Menu item created: {menu_item.name}")
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         else:

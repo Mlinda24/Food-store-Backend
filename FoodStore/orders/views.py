@@ -43,7 +43,8 @@ class CartViewSet(viewsets.ViewSet):
             menu_item = get_object_or_404(MenuItem, id=menu_item_id)
 
             if not cart.restaurant_id:
-                cart.restaurant_id = menu_item.restaurant.id  # ← fixed
+                cart.restaurant_id = menu_item.restaurant.id
+                cart.restaurant_name = menu_item.restaurant.name
                 cart.save()
 
             if cart.restaurant_id and cart.restaurant_id != menu_item.restaurant.id:
@@ -152,30 +153,42 @@ class OrderViewSet(viewsets.ModelViewSet):
         if RESTAURANTS_AVAILABLE and hasattr(user, 'role') and user.role == 'restaurant':
             try:
                 restaurant = Restaurant.objects.get(owner=user)
-                return Order.objects.filter(restaurant=restaurant).order_by('-created')
+                return Order.objects.filter(restaurant_id=restaurant.id).order_by('-created')
             except Restaurant.DoesNotExist:
                 return Order.objects.none()
 
         return Order.objects.filter(customer=user).order_by('-created')
 
     def create(self, request, *args, **kwargs):
-        try:
-            cart = Cart.objects.get(user=request.user)
-        except Cart.DoesNotExist:
-            return Response(
-                {'error': 'Cart not found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Get or create cart
+        cart, _ = Cart.objects.get_or_create(user=request.user)
 
+        # Get restaurant_id — from cart first, fall back to request data
+        restaurant_id = cart.restaurant_id or request.data.get('restaurant_id')
+
+        # If cart is empty, try to rebuild from request context
+        # (handles case where cart was cleared between sessions)
         if not cart.items.exists():
             return Response(
-                {'error': 'Cart is empty'},
+                {'error': 'Cart is empty. Please add items before placing an order.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if RESTAURANTS_AVAILABLE and not cart.restaurant_id:
+        if RESTAURANTS_AVAILABLE and not restaurant_id:
             return Response(
                 {'error': 'No restaurant selected'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Sync cart restaurant_id if it came from request
+        if not cart.restaurant_id and restaurant_id:
+            cart.restaurant_id = int(restaurant_id)
+            cart.save()
+
+        delivery_address = request.data.get('delivery_address', '').strip()
+        if not delivery_address:
+            return Response(
+                {'error': 'Delivery address is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -183,13 +196,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             item.menu_item_price * item.quantity
             for item in cart.items.all()
         )
-
-        delivery_address = request.data.get('delivery_address', '')
-        if not delivery_address:
-            return Response(
-                {'error': 'Delivery address is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
         order_data = {
             'customer': request.user,
@@ -199,7 +205,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         }
 
         if RESTAURANTS_AVAILABLE:
-            order_data['restaurant_id'] = cart.restaurant_id
+            order_data['restaurant_id'] = cart.restaurant_id or int(restaurant_id)
 
         order = Order.objects.create(**order_data)
 
@@ -215,6 +221,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 special_instructions=cart_item.special_instructions
             )
 
+        # Clear cart after order created
         cart.items.all().delete()
         cart.restaurant_id = None
         cart.save()
