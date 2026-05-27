@@ -34,6 +34,7 @@ urlpatterns = [
     path('api/', include('payments.urls')),
     path('api/drivers/', include('drivers.urls')),  # Moved before api-auth
     
+    
     # DRF login
     path('api-auth/', include('rest_framework.urls')),
 
