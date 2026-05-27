@@ -88,20 +88,22 @@ class PaymentDetailSerializer(serializers.ModelSerializer):
 
 
 class InitiatePaymentSerializer(serializers.Serializer):
-    """Serializer for initiating a payment"""
+    """Serializer for initiating a payment - Updated to support paychangu"""
     order_id = serializers.IntegerField(
         required=True,
         help_text="ID of the order to pay for"
     )
     method = serializers.ChoiceField(
-        choices=['mpamba', 'airtel_money'],
+        choices=['mpamba', 'airtel_money', 'cash_on_delivery', 'paychangu'],
         required=True,
-        help_text="Payment method: mpamba or airtel_money"
+        help_text="Payment method: mpamba, airtel_money, cash_on_delivery, or paychangu"
     )
     phone_number = serializers.CharField(
         max_length=20,
-        required=True,
-        help_text="Phone number for mobile money payment (e.g., 0999123456)"
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        help_text="Phone number for mobile money payment (required for mpamba/airtel_money)"
     )
 
     def validate_order_id(self, value):
@@ -119,12 +121,17 @@ class InitiatePaymentSerializer(serializers.Serializer):
         return value
 
     def validate_phone_number(self, value):
-        if not value:
-            raise serializers.ValidationError("Phone number is required for mobile money payment")
-        if not value.isdigit():
-            raise serializers.ValidationError("Phone number must contain only digits")
-        if len(value) not in (9, 10):
-            raise serializers.ValidationError("Phone number must be 9 or 10 digits")
+        method = self.initial_data.get('method')
+        
+        # Phone number is only required for mpamba and airtel_money
+        if method in ['mpamba', 'airtel_money']:
+            if not value or value.strip() == '':
+                raise serializers.ValidationError("Phone number is required for mobile money payment")
+            if not value.isdigit():
+                raise serializers.ValidationError("Phone number must contain only digits")
+            if len(value) not in (9, 10):
+                raise serializers.ValidationError("Phone number must be 9 or 10 digits")
+        
         return value
 
 
