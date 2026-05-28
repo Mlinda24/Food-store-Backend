@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ─── Core ────────────────────────────────────────────────────────────────────
 
-SECRET_KEY = os.environ['SECRET_KEY']  # Hard fail if missing — intentional
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-this')
 
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
@@ -21,7 +21,7 @@ ALLOWED_HOSTS = [
     h.strip()
     for h in os.environ.get(
         'ALLOWED_HOSTS',
-        '.onrender.com,localhost,127.0.0.1'
+        '.onrender.com,localhost,127.0.0.1,192.168.137.1'
     ).split(',')
     if h.strip()
 ]
@@ -90,6 +90,7 @@ CSRF_TRUSTED_ORIGINS = [
     'https://*.ngrok.io',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    'http://192.168.137.1:8000',
 ]
 
 # ─── Security (production only) ──────────────────────────────────────────────
@@ -105,6 +106,10 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     X_FRAME_OPTIONS = 'DENY'
+else:
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
@@ -168,7 +173,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PARSER_CLASSES': (
         'rest_framework.parsers.JSONParser',
-        'rest_framework.parsers.MultiPartParser',   # required for file uploads
+        'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ),
 }
@@ -195,48 +200,55 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# ─── Cloudinary (media storage) ──────────────────────────────────────────────
-# The SDK reads CLOUDINARY_URL from the environment automatically.
-# We also call cloudinary.config() explicitly as a safety net.
+# ─── Cloudinary (media storage) - FIXED ──────────────────────────────────────
 
-_cloudinary_url = os.environ.get('CLOUDINARY_URL', '')
+# Get Cloudinary credentials from environment
+CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', 'dvtfdu0yq')
+CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '997758335612991')
+CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', 'vM7te6Bd-wO_78r_r9qP4cM0q-0')
 
-# Guard: if someone accidentally left the placeholder, build the URL from parts
-if not _cloudinary_url or '<' in _cloudinary_url:
-    _cn = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
-    _ak = os.environ.get('CLOUDINARY_API_KEY', '')
-    _as = os.environ.get('CLOUDINARY_API_SECRET', '')
-    if _cn and _ak and _as:
-        _cloudinary_url = f'cloudinary://{_ak}:{_as}@{_cn}'
-        os.environ['CLOUDINARY_URL'] = _cloudinary_url
-
+# Configure Cloudinary
 cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
+    cloud_name=CLOUDINARY_CLOUD_NAME,
+    api_key=CLOUDINARY_API_KEY,
+    api_secret=CLOUDINARY_API_SECRET,
     secure=True,
 )
 
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY'),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET'),
+    'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
+    'API_KEY': CLOUDINARY_API_KEY,
+    'API_SECRET': CLOUDINARY_API_SECRET,
     'SECURE': True,
 }
 
+# FORCE Cloudinary for ALL file storage - THIS IS CRITICAL
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
-# Keep MEDIA_URL/ROOT for the Django admin file widget to work correctly
+# Also configure storages for Django 4.2+
+STORAGES = {
+    'default': {
+        'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
+
+# Keep MEDIA_URL/ROOT for compatibility (Cloudinary overrides this)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Create media directory if it doesn't exist
+MEDIA_ROOT.mkdir(exist_ok=True)
 
 # ─── Payment ─────────────────────────────────────────────────────────────────
 
 PAYCHANGU_PUBLIC_KEY = os.environ.get('PAYCHANGU_PUBLIC_KEY', '')
 PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY', '')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
-WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', '')
-PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', '')
+WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
+PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 
 # ─── Email ───────────────────────────────────────────────────────────────────
 
@@ -244,10 +256,10 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
-SITE_URL = os.environ.get('SITE_URL', '')
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'Bsc-21-22@unima.ac.mw')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'cxwjbnbhaoipfctz')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Bsc-21-22@unima.ac.mw')
+SITE_URL = os.environ.get('SITE_URL', 'https://food-store-backend-4eo6.onrender.com')
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
