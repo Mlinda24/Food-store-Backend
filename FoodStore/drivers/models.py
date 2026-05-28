@@ -1,8 +1,8 @@
-# drivers/models.py
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from decimal import Decimal
+from datetime import date, timedelta
 
 class DriverProfile(models.Model):
     """Driver profile extending the User model"""
@@ -28,23 +28,23 @@ class DriverProfile(models.Model):
     )
     
     # Personal Information
-    phone_number = models.CharField(max_length=20)
-    alternative_phone = models.CharField(max_length=20, blank=True)
+    phone_number = models.CharField(max_length=20, default='')
+    alternative_phone = models.CharField(max_length=20, blank=True, default='')
     
     # Vehicle Information
     vehicle_type = models.CharField(max_length=20, choices=VEHICLE_CHOICES, default='motorcycle')
-    vehicle_registration = models.CharField(max_length=50)
-    vehicle_model = models.CharField(max_length=100, blank=True)
-    vehicle_color = models.CharField(max_length=50, blank=True)
+    vehicle_registration = models.CharField(max_length=50, blank=True, default='')
+    vehicle_model = models.CharField(max_length=100, blank=True, default='')
+    vehicle_color = models.CharField(max_length=50, blank=True, default='')
     
     # License Information
-    license_number = models.CharField(max_length=50)
-    license_expiry_date = models.DateField()
+    license_number = models.CharField(max_length=50, blank=True, default='')
+    license_expiry_date = models.DateField(default=date.today() + timedelta(days=365*3))
     
     # Verification
     is_verified = models.BooleanField(default=False)
     verification_documents = models.JSONField(default=dict, blank=True)
-    verification_notes = models.TextField(blank=True)
+    verification_notes = models.TextField(blank=True, default='')
     verified_at = models.DateTimeField(null=True, blank=True)
     verified_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -94,7 +94,7 @@ class DriverProfile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
-        return f"Driver: {self.user.username} - {self.vehicle_registration}"
+        return f"Driver: {self.user.username} - {self.vehicle_registration or 'No Vehicle'}"
     
     @property
     def display_name(self):
@@ -245,7 +245,7 @@ class DriverEarning(models.Model):
     
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     earning_type = models.CharField(max_length=20, choices=EARNING_TYPE_CHOICES)
-    description = models.CharField(max_length=255, blank=True)
+    description = models.CharField(max_length=255, blank=True, default='')
     
     created_at = models.DateTimeField(auto_now_add=True)
     
