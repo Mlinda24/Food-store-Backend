@@ -195,7 +195,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# ============ CLOUDINARY CONFIGURATION ============
+# ============ CLOUDINARY CONFIGURATION (FIXED) ============
 # Cloudinary configuration for media files
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
@@ -204,7 +204,7 @@ CLOUDINARY_STORAGE = {
     'SECURE': True,
 }
 
-# Configure Cloudinary
+# Configure Cloudinary regardless of environment
 if os.environ.get('CLOUDINARY_CLOUD_NAME'):
     cloudinary.config(
         cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
@@ -213,15 +213,15 @@ if os.environ.get('CLOUDINARY_CLOUD_NAME'):
         secure=True
     )
 
-# Use Cloudinary for media files in production
-if not DEBUG and os.environ.get('CLOUDINARY_CLOUD_NAME'):
-    DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+# CRITICAL: Force Cloudinary for ALL environments (both development and production)
+# This ensures images are always uploaded to Cloudinary
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
-# Media files configuration (local fallback for development)
+# Media files configuration (fallback for local development only)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-# Create media directory if it doesn't exist
+# Create media directory if it doesn't exist (for local dev)
 if not os.path.exists(MEDIA_ROOT):
     os.makedirs(MEDIA_ROOT)
 
