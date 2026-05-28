@@ -32,7 +32,7 @@ urlpatterns = [
     path('api/', include('restaurants.urls')),
     path('api/orders/', include('orders.urls')),
     path('api/', include('payments.urls')),
-    path('api/drivers/', include('drivers.urls')),  # Moved before api-auth
+    path('api/drivers/', include('drivers.urls')),
     
     # DRF login
     path('api-auth/', include('rest_framework.urls')),
@@ -40,10 +40,9 @@ urlpatterns = [
     # Swagger UI
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    # path('api/notifications/', include('notifications.urls')),  # Uncomment when ready
 ]
 
-# Serve media and static files during development
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+# Serve media and static files in ALL environments (including production)
+# This is necessary for Render to serve uploaded images
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
