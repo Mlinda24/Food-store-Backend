@@ -4,14 +4,16 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Sum
+from decimal import Decimal
 from datetime import date
 
-from .models import Restaurant, MenuItem, Category
+from .models import Restaurant, MenuItem, Category, RestaurantWallet, WalletTransaction
 from .serializers import (
     RestaurantSerializer, MenuItemSerializer, MenuItemPublicSerializer, 
     CategorySerializer
 )
 from orders.models import Order
+
 
 # ------------------------------
 # Restaurant ViewSet
@@ -28,7 +30,9 @@ class RestaurantViewSet(viewsets.ModelViewSet):
         return Restaurant.objects.all()
 
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+        restaurant = serializer.save(owner=self.request.user)
+        # Create wallet automatically for new restaurant
+        RestaurantWallet.objects.get_or_create(restaurant=restaurant)
 
     @action(detail=False, methods=['get', 'patch'])
     def my_restaurant(self, request):
@@ -52,6 +56,9 @@ class RestaurantViewSet(viewsets.ModelViewSet):
     def stats(self, request):
         try:
             restaurant = Restaurant.objects.get(owner=request.user)
+            
+            # Get or create wallet
+            wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
 
             now = timezone.now()
             today = now.date()
@@ -72,19 +79,145 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 status__in=['pending', 'confirmed', 'preparing']
             )
 
+            total_earnings = total_orders.aggregate(Sum('total_price'))['total_price__sum'] or Decimal('0')
+            monthly_earnings = monthly_orders.aggregate(Sum('total_price'))['total_price__sum'] or Decimal('0')
+            today_earnings = today_orders.aggregate(Sum('total_price'))['total_price__sum'] or Decimal('0')
+
             stats = {
-                'todayEarnings': float(today_orders.aggregate(Sum('total_price'))['total_price__sum'] or 0),
+                # Wallet information (what they can withdraw)
+                'walletBalance': float(wallet.balance),
+                'totalEarned': float(wallet.total_earned),
+                'totalWithdrawn': float(wallet.total_withdrawn),
+                # Order statistics (for display only)
+                'todayEarnings': float(today_earnings),
                 'todayOrders': today_orders.count(),
-                'monthlyEarnings': float(monthly_orders.aggregate(Sum('total_price'))['total_price__sum'] or 0),
+                'monthlyEarnings': float(monthly_earnings),
                 'monthlyOrders': monthly_orders.count(),
-                'totalEarnings': float(total_orders.aggregate(Sum('total_price'))['total_price__sum'] or 0),
+                'totalEarnings': float(total_earnings),
                 'totalOrders': total_orders.count(),
                 'activeOrders': active_orders.count(),
-                'averageRating': 4.8,
+                'averageRating': float(restaurant.rating) if restaurant.rating else 4.5,
             }
             return Response(stats)
         except Restaurant.DoesNotExist:
             return Response({'detail': 'No restaurant found'}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=['get'])
+    def wallet_balance(self, request):
+        """Get restaurant wallet balance"""
+        try:
+            restaurant = Restaurant.objects.get(owner=request.user)
+            wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
+            
+            return Response({
+                'balance': float(wallet.balance),
+                'total_earned': float(wallet.total_earned),
+                'total_withdrawn': float(wallet.total_withdrawn),
+            })
+        except Restaurant.DoesNotExist:
+            return Response({'error': 'Restaurant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=['get'])
+    def wallet_transactions(self, request):
+        """Get wallet transaction history"""
+        try:
+            restaurant = Restaurant.objects.get(owner=request.user)
+            wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
+            
+            transactions = WalletTransaction.objects.filter(wallet=wallet).order_by('-created_at')[:50]
+            
+            data = []
+            for tx in transactions:
+                data.append({
+                    'id': tx.id,
+                    'type': tx.transaction_type,
+                    'amount': float(tx.amount),
+                    'formatted_amount': f"MK{tx.amount:,.2f}",
+                    'status': tx.status,
+                    'reference': str(tx.reference),
+                    'description': tx.description,
+                    'created_at': tx.created_at.isoformat(),
+                })
+            
+            return Response({
+                'balance': float(wallet.balance),
+                'total_earned': float(wallet.total_earned),
+                'total_withdrawn': float(wallet.total_withdrawn),
+                'transactions': data
+            })
+        except Restaurant.DoesNotExist:
+            return Response({'error': 'Restaurant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=['post'])
+    def withdraw(self, request):
+        """Request withdrawal from restaurant wallet to mobile money"""
+        try:
+            restaurant = Restaurant.objects.get(owner=request.user)
+            wallet = restaurant.wallet
+            
+            amount = Decimal(str(request.data.get('amount', '0')))
+            phone_number = request.data.get('phone_number', '')
+            provider = request.data.get('provider', 'mpamba')
+            
+            # Validate amount
+            if amount <= 0:
+                return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Check minimum withdrawal
+            min_withdrawal = Decimal('1000.00')
+            if amount < min_withdrawal:
+                return Response({'error': f'Minimum withdrawal amount is MK{min_withdrawal}'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Check sufficient balance
+            if wallet.balance < amount:
+                return Response({'error': f'Insufficient balance. Available: MK{wallet.balance}'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate phone number
+            if not phone_number:
+                return Response({'error': 'Phone number is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Clean phone number
+            phone_cleaned = ''.join(filter(str.isdigit, phone_number))
+            if len(phone_cleaned) < 9:
+                return Response({'error': 'Please enter a valid phone number'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if not phone_cleaned.startswith('0'):
+                phone_cleaned = f'0{phone_cleaned}'
+            
+            # Deduct wallet balance
+            wallet.balance -= amount
+            wallet.total_withdrawn += amount
+            wallet.save()
+            
+            # Create transaction record
+            import uuid
+            transaction = WalletTransaction.objects.create(
+                wallet=wallet,
+                transaction_type='debit',
+                amount=amount,
+                status='pending',
+                description=f'Withdrawal request to {phone_cleaned} via {provider}'
+            )
+            
+            print(f'💰 Withdrawal requested:')
+            print(f'   Restaurant: {restaurant.name}')
+            print(f'   Amount: MK{amount}')
+            print(f'   Phone: {phone_cleaned}')
+            print(f'   Provider: {provider}')
+            print(f'   New Balance: MK{wallet.balance}')
+            
+            return Response({
+                'success': True,
+                'message': 'Withdrawal request submitted successfully',
+                'reference': str(transaction.reference),
+                'amount': float(amount),
+                'new_balance': float(wallet.balance),
+            }, status=status.HTTP_200_OK)
+            
+        except Restaurant.DoesNotExist:
+            return Response({'error': 'Restaurant not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ------------------------------

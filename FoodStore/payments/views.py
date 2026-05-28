@@ -23,6 +23,9 @@ from .serializers import (
     PaymentStatusSerializer,
 )
 
+# Import wallet models
+from restaurants.models import RestaurantWallet, WalletTransaction
+
 logger = logging.getLogger(__name__)
 
 # Maps our internal method name to the operator string PayChangu expects
@@ -86,6 +89,8 @@ class PaymentViewSet(viewsets.ViewSet):
             reference=reference,
             phone_number=phone,
             status='pending',
+            subtotal_amount=order.total_price,
+            delivery_fee=getattr(order, 'delivery_fee', 2000.0),
         )
 
         # Build PayChangu payload
@@ -207,13 +212,19 @@ class PaymentViewSet(viewsets.ViewSet):
         order_id = request.data.get('order_id')
         
         if not order_id:
-            return Response({'error': 'order_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'order_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         try:
             order = Order.objects.get(id=order_id, customer=request.user)
             print(f"✅ Order #{order.id} found - Total: MK{order.total_price}")
         except Order.DoesNotExist:
-            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': 'Order not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
         
         # Check if already paid
         if hasattr(order, 'payment') and order.payment.status == 'completed':
@@ -223,7 +234,7 @@ class PaymentViewSet(viewsets.ViewSet):
                     'payment_status': order.payment.status,
                     'reference': order.payment.reference,
                 },
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_400_BAD_REQUEST
             )
         
         # Generate unique reference
@@ -238,11 +249,12 @@ class PaymentViewSet(viewsets.ViewSet):
             reference=reference,
             phone_number='',
             status='pending',
+            subtotal_amount=order.total_price,
+            delivery_fee=getattr(order, 'delivery_fee', 2000.0),
         )
         print(f"💰 Created payment record: #{payment.id}")
         
-        # Build PayChangu payload - WITHOUT operator and phone number
-        # PayChangu will show method selection page
+        # Build PayChangu payload
         paychangu_data = {
             'amount': str(order.total_price),
             'currency': 'MWK',
@@ -255,18 +267,11 @@ class PaymentViewSet(viewsets.ViewSet):
             'cancel_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true",
         }
         
-        print(f"📤 PayChangu payload: {paychangu_data}")
-        
         headers = {
             'Authorization': f'Bearer {settings.PAYCHANGU_SECRET_KEY}',
             'Content-Type': 'application/json',
             'Accept': 'application/json',
         }
-        
-        logger.info(
-            f"Initiating PayChangu payment (simple): reference={reference}, "
-            f"amount={order.total_price}"
-        )
         
         try:
             response = requests.post(
@@ -277,7 +282,6 @@ class PaymentViewSet(viewsets.ViewSet):
             )
             
             print(f"📡 PayChangu response status: {response.status_code}")
-            print(f"📡 PayChangu response body: {response.text[:500]}")  # Print first 500 chars
             
             if response.status_code in (200, 201):
                 response_data = response.json()
@@ -334,9 +338,9 @@ class PaymentViewSet(viewsets.ViewSet):
                 {'error': 'Payment service unavailable', 'details': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
+    
     # ------------------------------------------------------------------
-    # WEBHOOK
+    # WEBHOOK - FIXED WITH WALLET CREDIT
     # ------------------------------------------------------------------
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     @method_decorator(csrf_exempt)
@@ -408,51 +412,117 @@ class PaymentViewSet(viewsets.ViewSet):
                 payment = Payment.objects.get(reference=reference)
                 print(f"Found payment: ID={payment.id}, Order={payment.order.id}")
 
+                # -----------------------------------
+                # SUCCESSFUL PAYMENT - CREDIT WALLET
+                # -----------------------------------
                 if payment_status in ('completed', 'successful'):
-                    payment.status = 'completed'
-                    payment.transaction_id = transaction_id
-                    payment.payment_details = data
-                    payment.save()
+                    with db_transaction.atomic():
+                        # Prevent double processing
+                        if payment.distributed_to_wallets:
+                            print("Payment already distributed, skipping...")
+                            return Response({'message': 'Already processed'})
 
-                    order = payment.order
-                    order.status = 'confirmed'
-                    order.payment_status = 'paid'
-                    order.paid_at = timezone.now()
-                    order.save()
+                        payment.status = 'completed'
+                        payment.transaction_id = transaction_id
+                        payment.payment_details = data
+                        payment.paid_at = timezone.now()
 
-                    logger.info(f"Payment completed: reference={reference}, order={order.id}")
-                    print(f"Payment completed. Order #{order.id} status -> confirmed")
+                        order = payment.order
 
-                    # Send notification
-                    try:
-                        from notifications.services import NotificationService
-                        NotificationService.send_notification(
-                            user=order.customer,
-                            notification_type='payment',
-                            title='Payment Successful',
-                            message=(
-                                f'Your payment of MK{payment.amount:,.2f} '
-                                f'for Order #{order.id} was successful.'
-                            ),
-                            data={
-                                'id': str(order.id),
-                                'transaction_id': str(transaction_id or ''),
-                                'amount': str(payment.amount),
-                            },
-                            send_email=True,
-                            send_sms=False,
-                            priority='high',
+                        # -----------------------------------
+                        # CALCULATIONS
+                        # -----------------------------------
+                        total_amount = Decimal(str(payment.amount))
+                        platform_fee_percent = Decimal('10.00')
+                        platform_fee = (total_amount * platform_fee_percent) / Decimal('100')
+                        restaurant_amount = total_amount - platform_fee
+
+                        # Save breakdown to payment
+                        payment.platform_fee_percent = platform_fee_percent
+                        payment.platform_fee = platform_fee
+                        payment.restaurant_amount = restaurant_amount
+                        payment.distributed_to_wallets = True
+                        payment.distributed_at = timezone.now()
+                        payment.save()
+
+                        # -----------------------------------
+                        # UPDATE ORDER
+                        # -----------------------------------
+                        order.status = 'confirmed'
+                        order.payment_status = 'paid'
+                        order.paid_at = timezone.now()
+                        order.save()
+
+                        # -----------------------------------
+                        # CREDIT RESTAURANT WALLET (FIXED)
+                        # -----------------------------------
+                        restaurant = order.restaurant
+                        print(f"💰 Crediting wallet for restaurant: {restaurant.name}")
+
+                        # Get or create wallet
+                        wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
+                        
+                        if created:
+                            print(f"✅ Created new wallet for {restaurant.name}")
+
+                        # Add amount to wallet
+                        wallet.balance += restaurant_amount
+                        wallet.total_earned += restaurant_amount
+                        wallet.save()
+
+                        print(f"   Old balance: MK{wallet.balance - restaurant_amount:,.2f}")
+                        print(f"   Added: MK{restaurant_amount:,.2f}")
+                        print(f"   New balance: MK{wallet.balance:,.2f}")
+                        print(f"   Total earned: MK{wallet.total_earned:,.2f}")
+
+                        # Create wallet transaction record
+                        transaction = WalletTransaction.objects.create(
+                            wallet=wallet,
+                            transaction_type='credit',
+                            amount=restaurant_amount,
+                            status='successful',
+                            description=f'Payment from Order #{order.id} - {order.customer.username}'
                         )
-                    except Exception as notif_err:
-                        logger.error(f"Notification failed (non-fatal): {notif_err}")
+                        print(f"📝 Wallet transaction created: {transaction.reference}")
 
+                        logger.info(f"Payment completed and wallet credited: reference={reference}, order={order.id}")
+
+                        # Send notification
+                        try:
+                            from notifications.services import NotificationService
+                            NotificationService.send_notification(
+                                user=order.customer,
+                                notification_type='payment',
+                                title='Payment Successful',
+                                message=(
+                                    f'Your payment of MK{payment.amount:,.2f} '
+                                    f'for Order #{order.id} was successful.'
+                                ),
+                                data={
+                                    'id': str(order.id),
+                                    'transaction_id': str(transaction_id or ''),
+                                    'amount': str(payment.amount),
+                                },
+                                send_email=True,
+                                send_sms=False,
+                                priority='high',
+                            )
+                        except Exception as notif_err:
+                            logger.error(f"Notification failed (non-fatal): {notif_err}")
+
+                # -----------------------------------
+                # FAILED PAYMENT
+                # -----------------------------------
                 elif payment_status == 'failed':
                     payment.status = 'failed'
                     payment.payment_details = data
                     payment.save()
-                    logger.info(f"Payment failed: reference={reference}")
+                    logger.warning(f"Payment failed: reference={reference}")
                     print(f"Payment failed for Order #{payment.order.id}")
 
+                # -----------------------------------
+                # PROCESSING PAYMENT
+                # -----------------------------------
                 elif payment_status in ('pending', 'processing'):
                     payment.status = 'processing'
                     payment.payment_details = data
@@ -468,6 +538,9 @@ class PaymentViewSet(viewsets.ViewSet):
                 webhook_log.reference = f"{reference}_not_found"
                 webhook_log.save()
                 print(f"Payment not found for reference: {reference}")
+            except Exception as e:
+                logger.error(f"Webhook processing error: {e}")
+                print(f"❌ Webhook error: {e}")
         else:
             logger.warning("Webhook received with no reference field")
             print("No reference found in webhook data")
@@ -521,6 +594,34 @@ class PaymentViewSet(viewsets.ViewSet):
                     order.payment_status = 'paid'
                     order.paid_at = timezone.now()
                     order.save()
+
+                    # Credit wallet if not already done
+                    if not payment.distributed_to_wallets:
+                        restaurant = order.restaurant
+                        wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
+                        
+                        total_amount = Decimal(str(payment.amount))
+                        platform_fee_percent = Decimal('10.00')
+                        platform_fee = (total_amount * platform_fee_percent) / Decimal('100')
+                        restaurant_amount = total_amount - platform_fee
+                        
+                        payment.platform_fee = platform_fee
+                        payment.restaurant_amount = restaurant_amount
+                        payment.distributed_to_wallets = True
+                        payment.distributed_at = timezone.now()
+                        payment.save()
+                        
+                        wallet.balance += restaurant_amount
+                        wallet.total_earned += restaurant_amount
+                        wallet.save()
+                        
+                        WalletTransaction.objects.create(
+                            wallet=wallet,
+                            transaction_type='credit',
+                            amount=restaurant_amount,
+                            status='successful',
+                            description=f'Payment from Order #{order.id} via verification'
+                        )
 
                     return Response(
                         {

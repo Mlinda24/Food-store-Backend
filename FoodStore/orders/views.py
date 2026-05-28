@@ -36,7 +36,7 @@ class CartViewSet(viewsets.ViewSet):
         if not menu_item_id:
             return Response(
                 {'error': 'menu_item_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if RESTAURANTS_AVAILABLE:
@@ -50,7 +50,7 @@ class CartViewSet(viewsets.ViewSet):
             if cart.restaurant_id and cart.restaurant_id != menu_item.restaurant.id:
                 return Response(
                     {'error': 'Cannot add items from different restaurants'},
-                    status=status.HTTP_400_BAD_REQUEST
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             cart_item, created = CartItem.objects.get_or_create(
@@ -62,7 +62,7 @@ class CartViewSet(viewsets.ViewSet):
                     'menu_item_name': menu_item.name,
                     'menu_item_price': menu_item.price,
                     'special_instructions': special_instructions,
-                }
+                },
             )
         else:
             cart_item, created = CartItem.objects.get_or_create(
@@ -74,7 +74,7 @@ class CartViewSet(viewsets.ViewSet):
                     'menu_item_name': f'Item {menu_item_id}',
                     'menu_item_price': 0,
                     'special_instructions': special_instructions,
-                }
+                },
             )
 
         if not created:
@@ -93,7 +93,7 @@ class CartViewSet(viewsets.ViewSet):
         if not cart_item_id:
             return Response(
                 {'error': 'cart_item_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         cart_item = get_object_or_404(CartItem, id=cart_item_id, cart=cart)
@@ -115,7 +115,7 @@ class CartViewSet(viewsets.ViewSet):
         if not cart_item_id:
             return Response(
                 {'error': 'cart_item_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         cart_item = get_object_or_404(CartItem, id=cart_item_id, cart=cart)
@@ -136,7 +136,7 @@ class CartViewSet(viewsets.ViewSet):
         cart.save()
         return Response(
             {'message': 'Cart cleared successfully'},
-            status=status.HTTP_200_OK
+            status=status.HTTP_200_OK,
         )
 
 
@@ -160,27 +160,22 @@ class OrderViewSet(viewsets.ModelViewSet):
         return Order.objects.filter(customer=user).order_by('-created')
 
     def create(self, request, *args, **kwargs):
-        # Get or create cart
         cart, _ = Cart.objects.get_or_create(user=request.user)
 
-        # Get restaurant_id — from cart first, fall back to request data
         restaurant_id = cart.restaurant_id or request.data.get('restaurant_id')
 
-        # If cart is empty, try to rebuild from request context
-        # (handles case where cart was cleared between sessions)
         if not cart.items.exists():
             return Response(
                 {'error': 'Cart is empty. Please add items before placing an order.'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if RESTAURANTS_AVAILABLE and not restaurant_id:
             return Response(
                 {'error': 'No restaurant selected'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Sync cart restaurant_id if it came from request
         if not cart.restaurant_id and restaurant_id:
             cart.restaurant_id = int(restaurant_id)
             cart.save()
@@ -189,7 +184,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         if not delivery_address:
             return Response(
                 {'error': 'Delivery address is required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         total_price = sum(
@@ -202,6 +197,12 @@ class OrderViewSet(viewsets.ModelViewSet):
             'total_price': total_price,
             'delivery_address': delivery_address,
             'note': request.data.get('note', ''),
+            # -------------------------------------------------------
+            # IMPORTANT: always start as pending / unpaid.
+            # status only moves to 'confirmed' after payment webhook.
+            # -------------------------------------------------------
+            'status': 'pending',
+            'payment_status': 'unpaid',
         }
 
         if RESTAURANTS_AVAILABLE:
@@ -218,7 +219,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 quantity=cart_item.quantity,
                 price=cart_item.menu_item_price * cart_item.quantity,
                 customization=cart_item.customization,
-                special_instructions=cart_item.special_instructions
+                special_instructions=cart_item.special_instructions,
             )
 
         # Clear cart after order created
@@ -236,13 +237,32 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         valid_statuses = [
             'pending', 'confirmed', 'preparing',
-            'ready', 'picked_up', 'delivered', 'cancelled'
+            'ready', 'picked_up', 'delivered', 'cancelled',
         ]
         if new_status not in valid_statuses:
             return Response(
                 {'error': f'Invalid status. Must be one of: {valid_statuses}'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # ------------------------------------------------------------------
+        # PAYMENT GUARD: only allow moving past 'pending' if the order
+        # has been paid.  The webhook sets payment_status='paid' — until
+        # that happens, no manual status advancement is permitted.
+        # ------------------------------------------------------------------
+        paid_statuses = {'confirmed', 'preparing', 'ready', 'picked_up', 'delivered'}
+        if new_status in paid_statuses:
+            order_payment_status = getattr(order, 'payment_status', None)
+            if order_payment_status != 'paid':
+                return Response(
+                    {
+                        'error': (
+                            f"Cannot set status to '{new_status}' — "
+                            "order has not been paid yet."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         order.status = new_status
         order.save()
