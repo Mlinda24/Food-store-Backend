@@ -22,7 +22,7 @@ from .serializers import (
     VerifyPaymentSerializer,
     PaymentStatusSerializer,
 )
-from restaurants.models import RestaurantWallet, WalletTransaction
+from restaurants.models import Restaurant, RestaurantWallet, WalletTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +32,33 @@ PAYCHANGU_OPERATOR_MAP = {
 }
 
 
-def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _get_restaurant_for_order(order) -> Restaurant:
+    """
+    Safely fetches the Restaurant for an order regardless of whether
+    `order.restaurant` is a ForeignKey accessor or just `restaurant_id`.
+    """
+    # If the ORM accessor works, use it
+    try:
+        restaurant = order.restaurant
+        if isinstance(restaurant, Restaurant):
+            return restaurant
+    except AttributeError:
+        pass
+
+    # Fallback: query by restaurant_id
+    return Restaurant.objects.select_related('wallet').get(id=order.restaurant_id)
+
+
+def _distribute_to_wallet(payment, transaction_id=None, raw_data=None) -> bool:
     """
     Credits the restaurant wallet for a completed payment.
     Idempotent — safe to call multiple times.
     Returns True if wallet was updated, False if already done.
     """
     if payment.distributed_to_wallets:
-        logger.info(f"Payment {payment.reference} already distributed — skipping")
+        logger.info(f'Payment {payment.reference} already distributed — skipping')
         return False
 
     with db_transaction.atomic():
@@ -68,17 +87,18 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
 
         order.status = 'confirmed'
         order.payment_status = 'paid'
-        order.paid_at = order.paid_at or timezone.now()
+        order.paid_at = getattr(order, 'paid_at', None) or timezone.now()
         order.save()
 
-        restaurant = order.restaurant
+        # ── THE FIX: use helper instead of order.restaurant ───────────────
+        restaurant = _get_restaurant_for_order(order)
         wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
         if created:
-            logger.info(f"Created new wallet for {restaurant.name}")
+            logger.info(f'Created new wallet for {restaurant.name}')
 
         wallet.balance += restaurant_amount
         wallet.total_earned += restaurant_amount
-        wallet.save()
+        wallet.save(update_fields=['balance', 'total_earned'])
 
         wallet_tx = WalletTransaction.objects.create(
             wallet=wallet,
@@ -89,12 +109,13 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
         )
 
         logger.info(
-            f"Wallet credited: restaurant={restaurant.name}, "
-            f"amount=MK{restaurant_amount:,.2f}, "
-            f"new_balance=MK{wallet.balance:,.2f}, "
-            f"tx={wallet_tx.reference}"
+            f'Wallet credited: restaurant={restaurant.name}, '
+            f'amount=MK{restaurant_amount:,.2f}, '
+            f'new_balance=MK{wallet.balance:,.2f}, '
+            f'tx={wallet_tx.reference}'
         )
 
+    # Notification (non-fatal — outside atomic block intentionally)
     try:
         from notifications.services import NotificationService
         NotificationService.send_notification(
@@ -112,19 +133,18 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
             priority='high',
         )
     except Exception as e:
-        logger.error(f"Notification failed (non-fatal): {e}")
+        logger.error(f'Notification failed (non-fatal): {e}')
 
     return True
 
 
 def _verify_with_paychangu(paychangu_tx_ref):
     """
-    Calls PayChangu verify API using THEIR tx_ref (stored as payment.transaction_id),
-    NOT our custom FOOD-xxx reference.
+    Calls PayChangu verify API using THEIR tx_ref (stored as payment.transaction_id).
     Returns (status_string, transaction_id, raw_data) or (None, None, None) on error.
     """
     if not paychangu_tx_ref:
-        logger.warning("_verify_with_paychangu called with empty ref — skipping")
+        logger.warning('_verify_with_paychangu called with empty ref — skipping')
         return None, None, None
 
     headers = {
@@ -134,7 +154,7 @@ def _verify_with_paychangu(paychangu_tx_ref):
     }
     try:
         response = requests.get(
-            f"{settings.PAYCHANGU_BASE_URL}/payment/verify/{paychangu_tx_ref}",
+            f'{settings.PAYCHANGU_BASE_URL}/payment/verify/{paychangu_tx_ref}',
             headers=headers,
             timeout=15,
         )
@@ -144,11 +164,20 @@ def _verify_with_paychangu(paychangu_tx_ref):
             remote_status = inner.get('status', '')
             transaction_id = inner.get('transaction_id') or inner.get('id')
             return remote_status, transaction_id, data
-        logger.warning(f"PayChangu verify returned {response.status_code}: {response.text}")
+        logger.warning(f'PayChangu verify returned {response.status_code}: {response.text}')
     except requests.RequestException as e:
-        logger.error(f"PayChangu verify request failed: {e}")
+        logger.error(f'PayChangu verify request failed: {e}')
     return None, None, None
 
+
+def _get_wallet_for_order(order) -> RestaurantWallet:
+    """Returns the wallet for the restaurant that owns the order."""
+    restaurant = _get_restaurant_for_order(order)
+    wallet, _ = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
+    return wallet
+
+
+# ─── ViewSet ──────────────────────────────────────────────────────────────────
 
 class PaymentViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -159,9 +188,8 @@ class PaymentViewSet(viewsets.ViewSet):
         except Payment.DoesNotExist:
             return None
 
-    # ------------------------------------------------------------------
-    # INITIATE PAYMENT
-    # ------------------------------------------------------------------
+    # ── INITIATE ──────────────────────────────────────────────────────────────
+
     @action(detail=False, methods=['post'])
     def initiate(self, request):
         serializer = InitiatePaymentSerializer(
@@ -189,7 +217,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        reference = f"FOOD-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+        reference = f'FOOD-{order.id}-{uuid.uuid4().hex[:8].upper()}'
         payment = Payment.objects.create(
             order=order,
             amount=order.total_price,
@@ -205,15 +233,15 @@ class PaymentViewSet(viewsets.ViewSet):
         paychangu_data = {
             'amount': str(order.total_price),
             'currency': 'MWK',
-            'email': request.user.email or f"user{order.customer_id}@foodstore.com",
+            'email': request.user.email or f'user{order.customer_id}@foodstore.com',
             'first_name': getattr(request.user, 'first_name', '') or 'Customer',
             'last_name': getattr(request.user, 'last_name', '') or 'User',
             'reference': reference,
-            'callback_url': f"{settings.WEBHOOK_BASE_URL}/api/payments/webhook/",
-            'return_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}",
-            'cancel_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true",
+            'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/webhook/',
+            'return_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}',
+            'cancel_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true',
         }
-        if method in ['mpamba', 'airtel_money']:
+        if method in ('mpamba', 'airtel_money'):
             paychangu_data['phone_number'] = phone
             paychangu_data['mobile_money_operator'] = operator
 
@@ -225,7 +253,7 @@ class PaymentViewSet(viewsets.ViewSet):
 
         try:
             response = requests.post(
-                f"{settings.PAYCHANGU_BASE_URL}/payment",
+                f'{settings.PAYCHANGU_BASE_URL}/payment',
                 json=paychangu_data,
                 headers=headers,
                 timeout=30,
@@ -233,7 +261,6 @@ class PaymentViewSet(viewsets.ViewSet):
             if response.status_code in (200, 201):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
-                # Store PayChangu's own tx_ref — needed for verify API calls
                 payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
                 payment.payment_details = response_data
                 payment.status = 'processing'
@@ -247,7 +274,7 @@ class PaymentViewSet(viewsets.ViewSet):
                         'reference': reference,
                         'checkout_url': checkout_url,
                         'amount': str(order.total_price),
-                        'formatted_amount': f"MK{order.total_price:,.2f}",
+                        'formatted_amount': f'MK{order.total_price:,.2f}',
                         'currency': 'MWK',
                         'method': method,
                         'status': payment.status,
@@ -272,12 +299,11 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # ------------------------------------------------------------------
-    # SIMPLE PAYMENT INITIATION
-    # ------------------------------------------------------------------
+    # ── INITIATE SIMPLE ───────────────────────────────────────────────────────
+
     @action(detail=False, methods=['post'])
     def initiate_simple(self, request):
-        logger.info("=== INITIATING SIMPLE PAYMENT ===")
+        logger.info('=== INITIATING SIMPLE PAYMENT ===')
 
         raw_order_id = request.data.get('order_id')
         if raw_order_id is None or str(raw_order_id).strip() == '':
@@ -296,7 +322,7 @@ class PaymentViewSet(viewsets.ViewSet):
         except Order.DoesNotExist:
             return Response({'error': f'Order {order_id} not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        logger.info(f"Order #{order.id} found — total: MK{order.total_price}")
+        logger.info(f'Order #{order.id} found — total: MK{order.total_price}')
 
         if hasattr(order, 'payment') and order.payment.status == 'completed':
             return Response(
@@ -311,9 +337,9 @@ class PaymentViewSet(viewsets.ViewSet):
         if hasattr(order, 'payment') and order.payment.status in ('pending', 'processing'):
             payment = order.payment
             reference = payment.reference
-            logger.info(f"Reusing existing payment reference: {reference}")
+            logger.info(f'Reusing existing payment reference: {reference}')
         else:
-            reference = f"FOOD-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+            reference = f'FOOD-{order.id}-{uuid.uuid4().hex[:8].upper()}'
             payment = Payment.objects.create(
                 order=order,
                 amount=order.total_price,
@@ -324,18 +350,18 @@ class PaymentViewSet(viewsets.ViewSet):
                 subtotal_amount=order.total_price,
                 delivery_fee=getattr(order, 'delivery_fee', 2000.0),
             )
-            logger.info(f"Created payment record #{payment.id}, reference={reference}")
+            logger.info(f'Created payment record #{payment.id}, reference={reference}')
 
         paychangu_data = {
             'amount': str(order.total_price),
             'currency': 'MWK',
-            'email': request.user.email or f"user{order.customer_id}@foodstore.com",
+            'email': request.user.email or f'user{order.customer_id}@foodstore.com',
             'first_name': getattr(request.user, 'first_name', '') or 'Customer',
             'last_name': getattr(request.user, 'last_name', '') or 'User',
             'reference': reference,
-            'callback_url': f"{settings.WEBHOOK_BASE_URL}/api/payments/webhook/",
-            'return_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}",
-            'cancel_url': f"{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true",
+            'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/webhook/',
+            'return_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}',
+            'cancel_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true',
         }
 
         headers = {
@@ -344,21 +370,20 @@ class PaymentViewSet(viewsets.ViewSet):
             'Accept': 'application/json',
         }
 
-        logger.info(f"Sending to PayChangu: {json.dumps(paychangu_data)}")
+        logger.info(f'Sending to PayChangu: {json.dumps(paychangu_data)}')
 
         try:
             response = requests.post(
-                f"{settings.PAYCHANGU_BASE_URL}/payment",
+                f'{settings.PAYCHANGU_BASE_URL}/payment',
                 json=paychangu_data,
                 headers=headers,
                 timeout=30,
             )
-            logger.info(f"PayChangu response: {response.status_code} — {response.text}")
+            logger.info(f'PayChangu response: {response.status_code} — {response.text}')
 
             if response.status_code in (200, 201):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
-                # Store PayChangu's own tx_ref — needed for verify API calls
                 payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
                 payment.payment_details = response_data
                 payment.status = 'processing'
@@ -366,14 +391,14 @@ class PaymentViewSet(viewsets.ViewSet):
                 checkout_url = (
                     data.get('checkout_url') or data.get('link') or response_data.get('checkout_url')
                 )
-                logger.info(f"Payment initiated. Checkout URL: {checkout_url}")
+                logger.info(f'Payment initiated. Checkout URL: {checkout_url}')
                 return Response(
                     {
                         'payment_id': payment.id,
                         'reference': reference,
                         'checkout_url': checkout_url,
                         'amount': str(order.total_price),
-                        'formatted_amount': f"MK{order.total_price:,.2f}",
+                        'formatted_amount': f'MK{order.total_price:,.2f}',
                         'currency': 'MWK',
                         'method': 'paychangu',
                         'status': payment.status,
@@ -398,13 +423,12 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # ------------------------------------------------------------------
-    # WEBHOOK
-    # ------------------------------------------------------------------
+    # ── WEBHOOK ───────────────────────────────────────────────────────────────
+
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     @method_decorator(csrf_exempt)
     def webhook(self, request):
-        logger.info("=== WEBHOOK RECEIVED FROM PAYCHANGU ===")
+        logger.info('=== WEBHOOK RECEIVED FROM PAYCHANGU ===')
         raw_body = request.body
 
         signature = (
@@ -419,7 +443,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 digestmod=hashlib.sha256,
             ).hexdigest()
             if not hmac.compare_digest(signature, expected_signature):
-                logger.warning("Webhook rejected: invalid signature")
+                logger.warning('Webhook rejected: invalid signature')
                 WebhookLog.objects.create(
                     reference='invalid_signature',
                     payload={'error': 'Invalid signature', 'headers': dict(request.headers)},
@@ -431,11 +455,9 @@ class PaymentViewSet(viewsets.ViewSet):
         except (json.JSONDecodeError, UnicodeDecodeError):
             data = request.data
 
-        logger.info(f"Webhook payload: {json.dumps(data, indent=2)}")
+        logger.info(f'Webhook payload: {json.dumps(data, indent=2)}')
 
         event_data = data.get('data', data)
-
-        # PayChangu sends their own tx_ref as 'reference', not our custom FOOD-xxx
         reference = (
             event_data.get('reference') or event_data.get('tx_ref')
             or data.get('reference') or data.get('tx_ref')
@@ -449,52 +471,50 @@ class PaymentViewSet(viewsets.ViewSet):
             reference=reference or 'unknown',
             payload=data,
         )
-        logger.info(f"Webhook logged: ID={webhook_log.id}, reference={reference}, status={payment_status}")
+        logger.info(f'Webhook logged: ID={webhook_log.id}, reference={reference}, status={payment_status}')
 
         if reference:
             try:
-                # 1st: try our custom reference (FOOD-xxx)
-                # 2nd: try PayChangu's tx_ref stored in transaction_id field
                 try:
-                    payment = Payment.objects.get(reference=reference)
+                    payment = Payment.objects.select_related('order', 'order__customer').get(
+                        reference=reference
+                    )
                 except Payment.DoesNotExist:
-                    payment = Payment.objects.get(transaction_id=reference)
+                    payment = Payment.objects.select_related('order', 'order__customer').get(
+                        transaction_id=reference
+                    )
 
-                logger.info(f"Found payment: ID={payment.id}, Order={payment.order.id}")
+                logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}')
 
                 if payment_status in ('completed', 'successful', 'success'):
                     distributed = _distribute_to_wallet(payment, transaction_id, data)
                     if not distributed:
-                        logger.info("Webhook: payment already distributed")
-
+                        logger.info('Webhook: payment already distributed')
                 elif payment_status == 'failed':
                     payment.status = 'failed'
                     payment.payment_details = data
                     payment.save()
-                    logger.warning(f"Payment failed: reference={reference}")
-
+                    logger.warning(f'Payment failed: reference={reference}')
                 elif payment_status in ('pending', 'processing'):
                     payment.status = 'processing'
                     payment.payment_details = data
                     payment.save()
-
                 else:
-                    logger.warning(f"Unknown webhook status: {payment_status}")
+                    logger.warning(f'Unknown webhook status: {payment_status}')
 
             except Payment.DoesNotExist:
-                logger.warning(f"Webhook for unknown reference: {reference}")
-                webhook_log.reference = f"{reference}_not_found"
+                logger.warning(f'Webhook for unknown reference: {reference}')
+                webhook_log.reference = f'{reference}_not_found'
                 webhook_log.save()
             except Exception as e:
-                logger.error(f"Webhook processing error: {e}", exc_info=True)
+                logger.error(f'Webhook processing error: {e}', exc_info=True)
         else:
-            logger.warning("Webhook received with no reference")
+            logger.warning('Webhook received with no reference')
 
         return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
 
-    # ------------------------------------------------------------------
-    # STATUS BY REFERENCE
-    # ------------------------------------------------------------------
+    # ── STATUS BY REFERENCE ───────────────────────────────────────────────────
+
     @action(detail=False, methods=['get'])
     def status_by_reference(self, request):
         reference = request.query_params.get('reference')
@@ -505,61 +525,55 @@ class PaymentViewSet(viewsets.ViewSet):
             )
 
         try:
-            payment = Payment.objects.get(reference=reference)
+            payment = Payment.objects.select_related('order', 'order__customer').get(
+                reference=reference
+            )
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
 
         if payment.order.customer != request.user and not request.user.is_staff:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Auto-verify with PayChangu on every poll while payment is pending/processing.
-        # Uses PayChangu's own tx_ref (payment.transaction_id), not our FOOD-xxx reference.
         if payment.status in ('processing', 'pending') and not payment.distributed_to_wallets:
-            paychangu_ref = payment.transaction_id  # PayChangu's tx_ref
+            paychangu_ref = payment.transaction_id
             if paychangu_ref:
                 logger.info(
-                    f"Polling status_by_reference for {reference} "
-                    f"— checking PayChangu with tx_ref={paychangu_ref}"
+                    f'Polling status_by_reference for {reference} '
+                    f'— checking PayChangu with tx_ref={paychangu_ref}'
                 )
                 remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
-
                 if remote_status in ('completed', 'successful', 'success'):
-                    logger.info("PayChangu confirms completed — distributing wallet now")
+                    logger.info('PayChangu confirms completed — distributing wallet now')
                     _distribute_to_wallet(payment, transaction_id, raw_data)
                     payment.refresh_from_db()
-
                 elif remote_status == 'failed':
                     payment.status = 'failed'
                     payment.save()
             else:
                 logger.warning(
-                    f"Payment {reference} has no transaction_id yet — "
-                    f"cannot verify with PayChangu"
+                    f'Payment {reference} has no transaction_id yet — cannot verify with PayChangu'
                 )
 
-        return Response(
-            {
-                'reference': payment.reference,
-                'status': payment.status,
-                'status_display': payment.get_status_display(),
-                'amount': str(payment.amount),
-                'formatted_amount': f"MK{payment.amount:,.2f}",
-                'method': payment.method,
-                'method_display': payment.get_method_display(),
-                'order_id': payment.order.id,
-                'transaction_id': payment.transaction_id,
-                'distributed_to_wallets': payment.distributed_to_wallets,
-                'distributed_at': payment.distributed_at,
-                'wallet_info': {
-                    'restaurant_amount': str(payment.restaurant_amount) if payment.restaurant_amount else None,
-                    'platform_fee': str(payment.platform_fee) if payment.platform_fee else None,
-                } if payment.distributed_to_wallets else None,
-            }
-        )
+        return Response({
+            'reference': payment.reference,
+            'status': payment.status,
+            'status_display': payment.get_status_display(),
+            'amount': str(payment.amount),
+            'formatted_amount': f'MK{payment.amount:,.2f}',
+            'method': payment.method,
+            'method_display': payment.get_method_display(),
+            'order_id': payment.order.id,
+            'transaction_id': payment.transaction_id,
+            'distributed_to_wallets': payment.distributed_to_wallets,
+            'distributed_at': payment.distributed_at,
+            'wallet_info': {
+                'restaurant_amount': str(payment.restaurant_amount) if payment.restaurant_amount else None,
+                'platform_fee': str(payment.platform_fee) if payment.platform_fee else None,
+            } if payment.distributed_to_wallets else None,
+        })
 
-    # ------------------------------------------------------------------
-    # VERIFY
-    # ------------------------------------------------------------------
+    # ── VERIFY ────────────────────────────────────────────────────────────────
+
     @action(detail=False, methods=['post'])
     def verify(self, request):
         serializer = VerifyPaymentSerializer(data=request.data, context={'request': request})
@@ -569,28 +583,27 @@ class PaymentViewSet(viewsets.ViewSet):
         reference = serializer.validated_data['reference']
 
         try:
-            payment = Payment.objects.get(reference=reference)
+            payment = Payment.objects.select_related('order', 'order__customer').get(
+                reference=reference
+            )
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Use PayChangu's tx_ref, not our custom reference
         paychangu_ref = payment.transaction_id or reference
         remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
 
         if remote_status in ('completed', 'successful', 'success'):
             _distribute_to_wallet(payment, transaction_id, raw_data)
             payment.refresh_from_db()
-            return Response(
-                {
-                    'status': 'completed',
-                    'message': 'Payment verified successfully',
-                    'reference': reference,
-                    'amount': str(payment.amount),
-                    'formatted_amount': f"MK{payment.amount:,.2f}",
-                    'distributed_to_wallets': payment.distributed_to_wallets,
-                },
-                status=status.HTTP_200_OK,
-            )
+            return Response({
+                'status': 'completed',
+                'message': 'Payment verified successfully',
+                'reference': reference,
+                'amount': str(payment.amount),
+                'formatted_amount': f'MK{payment.amount:,.2f}',
+                'distributed_to_wallets': payment.distributed_to_wallets,
+            }, status=status.HTTP_200_OK)
+
         elif remote_status == 'failed':
             payment.status = 'failed'
             if raw_data:
@@ -600,19 +613,15 @@ class PaymentViewSet(viewsets.ViewSet):
                 {'status': 'failed', 'message': 'Payment failed', 'reference': reference},
                 status=status.HTTP_200_OK,
             )
-        else:
-            return Response(
-                {
-                    'status': payment.status,
-                    'message': 'Payment pending verification',
-                    'reference': reference,
-                },
-                status=status.HTTP_200_OK,
-            )
 
-    # ------------------------------------------------------------------
-    # CHECK AND UPDATE WALLET (manual sync fallback)
-    # ------------------------------------------------------------------
+        return Response({
+            'status': payment.status,
+            'message': 'Payment pending verification',
+            'reference': reference,
+        }, status=status.HTTP_200_OK)
+
+    # ── CHECK AND UPDATE WALLET ───────────────────────────────────────────────
+
     @action(detail=False, methods=['get'])
     def check_and_update_wallet(self, request):
         order_id = request.query_params.get('order_id')
@@ -620,7 +629,9 @@ class PaymentViewSet(viewsets.ViewSet):
             return Response({'error': 'order_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            payment = Payment.objects.get(order_id=order_id)
+            payment = Payment.objects.select_related('order', 'order__customer').get(
+                order_id=order_id
+            )
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -628,7 +639,7 @@ class PaymentViewSet(viewsets.ViewSet):
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
         if payment.distributed_to_wallets:
-            wallet = RestaurantWallet.objects.get(restaurant=payment.order.restaurant)
+            wallet = _get_wallet_for_order(payment.order)
             return Response({
                 'already_updated': True,
                 'wallet_balance': float(wallet.balance),
@@ -642,7 +653,7 @@ class PaymentViewSet(viewsets.ViewSet):
         if remote_status in ('completed', 'successful', 'success'):
             _distribute_to_wallet(payment, transaction_id, raw_data)
             payment.refresh_from_db()
-            wallet = RestaurantWallet.objects.get(restaurant=payment.order.restaurant)
+            wallet = _get_wallet_for_order(payment.order)
             return Response({
                 'updated': True,
                 'wallet_balance': float(wallet.balance),
@@ -659,22 +670,24 @@ class PaymentViewSet(viewsets.ViewSet):
             'message': f'PayChangu status: {remote_status or payment.status}',
         })
 
-    # ------------------------------------------------------------------
-    # MANUAL CONFIRMATION (testing only)
-    # ------------------------------------------------------------------
+    # ── TEST CONFIRM (manual fallback) ────────────────────────────────────────
+
     @action(detail=False, methods=['post'])
     def test_confirm_payment(self, request):
         order_id = request.data.get('order_id')
         reference = request.data.get('reference')
 
         if not order_id and not reference:
-            return Response({'error': 'order_id or reference required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'order_id or reference required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             payment = (
-                Payment.objects.get(order_id=order_id)
+                Payment.objects.select_related('order', 'order__customer').get(order_id=order_id)
                 if order_id
-                else Payment.objects.get(reference=reference)
+                else Payment.objects.select_related('order', 'order__customer').get(reference=reference)
             )
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -682,11 +695,11 @@ class PaymentViewSet(viewsets.ViewSet):
         if payment.order.customer != request.user and not request.user.is_staff:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
-        transaction_id = f"MANUAL_{uuid.uuid4().hex[:8]}"
+        transaction_id = f'MANUAL_{uuid.uuid4().hex[:8]}'
         _distribute_to_wallet(payment, transaction_id)
         payment.refresh_from_db()
 
-        wallet = RestaurantWallet.objects.get(restaurant=payment.order.restaurant)
+        wallet = _get_wallet_for_order(payment.order)
         return Response({
             'status': 'completed',
             'message': 'Payment confirmed manually',
@@ -695,26 +708,26 @@ class PaymentViewSet(viewsets.ViewSet):
             'restaurant_amount': float(payment.restaurant_amount),
         })
 
-    # ------------------------------------------------------------------
-    # MY PAYMENTS
-    # ------------------------------------------------------------------
+    # ── MY PAYMENTS ───────────────────────────────────────────────────────────
+
     @action(detail=False, methods=['get'])
     def my_payments(self, request):
         payments = Payment.objects.filter(
             order__customer=request.user
-        ).order_by('-created_at')
+        ).select_related('order').order_by('-created_at')
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)
 
-    # ------------------------------------------------------------------
-    # LIST / RETRIEVE
-    # ------------------------------------------------------------------
+    # ── LIST / RETRIEVE ───────────────────────────────────────────────────────
+
     def list(self, request):
-        payments = (
+        qs = (
             Payment.objects.all() if request.user.is_staff
             else Payment.objects.filter(order__customer=request.user)
         )
-        serializer = PaymentSerializer(payments.order_by('-created_at'), many=True)
+        serializer = PaymentSerializer(
+            qs.select_related('order').order_by('-created_at'), many=True
+        )
         return Response(serializer.data)
 
     def retrieve(self, request, pk=None):
