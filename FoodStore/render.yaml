@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: food-store-backend
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: |
+      pip install -r requirements.txt
+      python manage.py collectstatic --noinput
+      python manage.py migrate
+    startCommand: gunicorn FoodStore.wsgi:application
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: food-store-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: SITE_URL
+        sync: false
+      - key: PAYCHANGU_PUBLIC_KEY
+        sync: false
+      - key: PAYCHANGU_SECRET_KEY
+        sync: false
+      - key: DEBUG
+        value: false
+      - key: ALLOWED_HOSTS
+        value: .onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://your-frontend.onrender.com
+
+databases:
+  - name: food-store-db
+    databaseName: food_store_db
+    user: food_store_user
+    plan: free
