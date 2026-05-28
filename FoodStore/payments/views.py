@@ -34,8 +34,8 @@ PAYCHANGU_OPERATOR_MAP = {
 
 def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
     """
-    Shared helper — credits the restaurant wallet for a completed payment.
-    Safe to call multiple times (idempotent via distributed_to_wallets flag).
+    Credits the restaurant wallet for a completed payment.
+    Idempotent — safe to call multiple times.
     Returns True if wallet was updated, False if already done.
     """
     if payment.distributed_to_wallets:
@@ -43,7 +43,6 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
         return False
 
     with db_transaction.atomic():
-        # Re-fetch with select_for_update to prevent race conditions
         payment = Payment.objects.select_for_update().get(pk=payment.pk)
         if payment.distributed_to_wallets:
             return False
@@ -67,13 +66,11 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
         payment.distributed_at = timezone.now()
         payment.save()
 
-        # Update order
         order.status = 'confirmed'
         order.payment_status = 'paid'
         order.paid_at = order.paid_at or timezone.now()
         order.save()
 
-        # Credit wallet
         restaurant = order.restaurant
         wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
         if created:
@@ -98,7 +95,6 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
             f"tx={wallet_tx.reference}"
         )
 
-    # Notify customer
     try:
         from notifications.services import NotificationService
         NotificationService.send_notification(
@@ -121,11 +117,16 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None):
     return True
 
 
-def _verify_with_paychangu(reference):
+def _verify_with_paychangu(paychangu_tx_ref):
     """
-    Calls PayChangu verify API.
+    Calls PayChangu verify API using THEIR tx_ref (stored as payment.transaction_id),
+    NOT our custom FOOD-xxx reference.
     Returns (status_string, transaction_id, raw_data) or (None, None, None) on error.
     """
+    if not paychangu_tx_ref:
+        logger.warning("_verify_with_paychangu called with empty ref — skipping")
+        return None, None, None
+
     headers = {
         'Authorization': f'Bearer {settings.PAYCHANGU_SECRET_KEY}',
         'Content-Type': 'application/json',
@@ -133,7 +134,7 @@ def _verify_with_paychangu(reference):
     }
     try:
         response = requests.get(
-            f"{settings.PAYCHANGU_BASE_URL}/payment/verify/{reference}",
+            f"{settings.PAYCHANGU_BASE_URL}/payment/verify/{paychangu_tx_ref}",
             headers=headers,
             timeout=15,
         )
@@ -232,6 +233,7 @@ class PaymentViewSet(viewsets.ViewSet):
             if response.status_code in (200, 201):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
+                # Store PayChangu's own tx_ref — needed for verify API calls
                 payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
                 payment.payment_details = response_data
                 payment.status = 'processing'
@@ -356,6 +358,7 @@ class PaymentViewSet(viewsets.ViewSet):
             if response.status_code in (200, 201):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
+                # Store PayChangu's own tx_ref — needed for verify API calls
                 payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
                 payment.payment_details = response_data
                 payment.status = 'processing'
@@ -431,6 +434,8 @@ class PaymentViewSet(viewsets.ViewSet):
         logger.info(f"Webhook payload: {json.dumps(data, indent=2)}")
 
         event_data = data.get('data', data)
+
+        # PayChangu sends their own tx_ref as 'reference', not our custom FOOD-xxx
         reference = (
             event_data.get('reference') or event_data.get('tx_ref')
             or data.get('reference') or data.get('tx_ref')
@@ -448,10 +453,16 @@ class PaymentViewSet(viewsets.ViewSet):
 
         if reference:
             try:
-                payment = Payment.objects.get(reference=reference)
+                # 1st: try our custom reference (FOOD-xxx)
+                # 2nd: try PayChangu's tx_ref stored in transaction_id field
+                try:
+                    payment = Payment.objects.get(reference=reference)
+                except Payment.DoesNotExist:
+                    payment = Payment.objects.get(transaction_id=reference)
+
                 logger.info(f"Found payment: ID={payment.id}, Order={payment.order.id}")
 
-                if payment_status in ('completed', 'successful'):
+                if payment_status in ('completed', 'successful', 'success'):
                     distributed = _distribute_to_wallet(payment, transaction_id, data)
                     if not distributed:
                         logger.info("Webhook: payment already distributed")
@@ -482,7 +493,7 @@ class PaymentViewSet(viewsets.ViewSet):
         return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
 
     # ------------------------------------------------------------------
-    # STATUS BY REFERENCE  ← KEY CHANGE: auto-verifies & updates wallet
+    # STATUS BY REFERENCE
     # ------------------------------------------------------------------
     @action(detail=False, methods=['get'])
     def status_by_reference(self, request):
@@ -501,23 +512,30 @@ class PaymentViewSet(viewsets.ViewSet):
         if payment.order.customer != request.user and not request.user.is_staff:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
-        # ── REAL-TIME CHECK ──────────────────────────────────────────────
-        # If payment is still processing, verify with PayChangu right now.
-        # This means the wallet updates on the very first poll after the
-        # customer completes payment, without waiting for the webhook.
+        # Auto-verify with PayChangu on every poll while payment is pending/processing.
+        # Uses PayChangu's own tx_ref (payment.transaction_id), not our FOOD-xxx reference.
         if payment.status in ('processing', 'pending') and not payment.distributed_to_wallets:
-            logger.info(f"Polling status_by_reference for {reference} — checking PayChangu...")
-            remote_status, transaction_id, raw_data = _verify_with_paychangu(reference)
+            paychangu_ref = payment.transaction_id  # PayChangu's tx_ref
+            if paychangu_ref:
+                logger.info(
+                    f"Polling status_by_reference for {reference} "
+                    f"— checking PayChangu with tx_ref={paychangu_ref}"
+                )
+                remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
 
-            if remote_status in ('completed', 'successful'):
-                logger.info(f"PayChangu confirms completed — distributing wallet now")
-                _distribute_to_wallet(payment, transaction_id, raw_data)
-                payment.refresh_from_db()
+                if remote_status in ('completed', 'successful', 'success'):
+                    logger.info("PayChangu confirms completed — distributing wallet now")
+                    _distribute_to_wallet(payment, transaction_id, raw_data)
+                    payment.refresh_from_db()
 
-            elif remote_status == 'failed':
-                payment.status = 'failed'
-                payment.save()
-        # ────────────────────────────────────────────────────────────────
+                elif remote_status == 'failed':
+                    payment.status = 'failed'
+                    payment.save()
+            else:
+                logger.warning(
+                    f"Payment {reference} has no transaction_id yet — "
+                    f"cannot verify with PayChangu"
+                )
 
         return Response(
             {
@@ -532,7 +550,6 @@ class PaymentViewSet(viewsets.ViewSet):
                 'transaction_id': payment.transaction_id,
                 'distributed_to_wallets': payment.distributed_to_wallets,
                 'distributed_at': payment.distributed_at,
-                # Wallet snapshot for frontend display
                 'wallet_info': {
                     'restaurant_amount': str(payment.restaurant_amount) if payment.restaurant_amount else None,
                     'platform_fee': str(payment.platform_fee) if payment.platform_fee else None,
@@ -556,9 +573,11 @@ class PaymentViewSet(viewsets.ViewSet):
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        remote_status, transaction_id, raw_data = _verify_with_paychangu(reference)
+        # Use PayChangu's tx_ref, not our custom reference
+        paychangu_ref = payment.transaction_id or reference
+        remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
 
-        if remote_status in ('completed', 'successful'):
+        if remote_status in ('completed', 'successful', 'success'):
             _distribute_to_wallet(payment, transaction_id, raw_data)
             payment.refresh_from_db()
             return Response(
@@ -617,9 +636,10 @@ class PaymentViewSet(viewsets.ViewSet):
                 'order_id': payment.order.id,
             })
 
-        # Try verifying with PayChangu first
-        remote_status, transaction_id, raw_data = _verify_with_paychangu(payment.reference)
-        if remote_status in ('completed', 'successful'):
+        paychangu_ref = payment.transaction_id or payment.reference
+        remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
+
+        if remote_status in ('completed', 'successful', 'success'):
             _distribute_to_wallet(payment, transaction_id, raw_data)
             payment.refresh_from_db()
             wallet = RestaurantWallet.objects.get(restaurant=payment.order.restaurant)
@@ -651,7 +671,11 @@ class PaymentViewSet(viewsets.ViewSet):
             return Response({'error': 'order_id or reference required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            payment = Payment.objects.get(order_id=order_id) if order_id else Payment.objects.get(reference=reference)
+            payment = (
+                Payment.objects.get(order_id=order_id)
+                if order_id
+                else Payment.objects.get(reference=reference)
+            )
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
 
