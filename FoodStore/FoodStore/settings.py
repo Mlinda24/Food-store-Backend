@@ -32,8 +32,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_yasg',
     'whitenoise.runserver_nostatic',
-    'cloudinary_storage',  # Add this BEFORE cloudinary
-    'cloudinary',          # Add this
+    'cloudinary_storage',
+    'cloudinary',
     'accounts',
     'restaurants',
     'orders',
@@ -84,6 +84,25 @@ MIDDLEWARE = [
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
     CORS_ALLOW_CREDENTIALS = True
+    CORS_ALLOW_METHODS = [
+        'DELETE',
+        'GET',
+        'OPTIONS',
+        'PATCH',
+        'POST',
+        'PUT',
+    ]
+    CORS_ALLOW_HEADERS = [
+        'accept',
+        'accept-encoding',
+        'authorization',
+        'content-type',
+        'dnt',
+        'origin',
+        'user-agent',
+        'x-csrftoken',
+        'x-requested-with',
+    ]
 else:
     CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://your-frontend.onrender.com').split(',')
     CORS_ALLOW_CREDENTIALS = True
@@ -182,24 +201,29 @@ CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
     'API_KEY': os.environ.get('CLOUDINARY_API_KEY'),
     'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET'),
-    'SECURE': True,  # Use HTTPS
+    'SECURE': True,
 }
 
 # Configure Cloudinary
-cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
-    secure=True
-)
+if os.environ.get('CLOUDINARY_CLOUD_NAME'):
+    cloudinary.config(
+        cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
+        api_key=os.environ.get('CLOUDINARY_API_KEY'),
+        api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
+        secure=True
+    )
 
 # Use Cloudinary for media files in production
-if not DEBUG:
+if not DEBUG and os.environ.get('CLOUDINARY_CLOUD_NAME'):
     DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
-    
+
 # Media files configuration (local fallback for development)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Create media directory if it doesn't exist
+if not os.path.exists(MEDIA_ROOT):
+    os.makedirs(MEDIA_ROOT)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -209,7 +233,7 @@ PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY', '')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
 
 # ============ WEBHOOK CONFIGURATION ============
-WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://your-app.onrender.com')
+WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 
 # ============ EMAIL CONFIGURATION ============
@@ -220,7 +244,7 @@ EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'Bsc-21-22@unima.ac.mw')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'cxwjbnbhaoipfctz')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Bsc-21-22@unima.ac.mw')
-SITE_URL = os.environ.get('SITE_URL', 'https://your-app.onrender.com')
+SITE_URL = os.environ.get('SITE_URL', 'https://food-store-backend-4eo6.onrender.com')
 
 # ============ LOGGING ============
 LOGGING = {
@@ -253,3 +277,8 @@ LOGGING = {
         },
     },
 }
+
+# Fix for Django admin with Python 3.14 - Add this at the end
+import copy
+if not hasattr(copy, 'copy'):
+    copy.copy = lambda x: x
