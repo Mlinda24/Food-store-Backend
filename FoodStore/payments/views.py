@@ -458,13 +458,24 @@ class PaymentViewSet(viewsets.ViewSet):
         logger.info(f'Webhook payload: {json.dumps(data, indent=2)}')
 
         event_data = data.get('data', data)
+        
+        # Try multiple possible reference fields
         reference = (
-            event_data.get('reference') or event_data.get('tx_ref')
-            or data.get('reference') or data.get('tx_ref')
+            event_data.get('reference') or 
+            event_data.get('tx_ref') or 
+            data.get('reference') or 
+            data.get('tx_ref')
         )
+        
+        # Also check if there's a reference in the customer data
+        if not reference and 'customer' in event_data:
+            reference = event_data.get('reference')
+        
         payment_status = event_data.get('status') or data.get('status')
         transaction_id = (
-            event_data.get('transaction_id') or event_data.get('id') or data.get('transaction_id')
+            event_data.get('transaction_id') or 
+            event_data.get('id') or 
+            data.get('transaction_id')
         )
 
         webhook_log = WebhookLog.objects.create(
@@ -475,14 +486,25 @@ class PaymentViewSet(viewsets.ViewSet):
 
         if reference:
             try:
+                # First try to find by our reference (FOOD-XXX)
                 try:
                     payment = Payment.objects.select_related('order', 'order__customer').get(
                         reference=reference
                     )
+                    logger.info(f'Found payment by reference: {payment.id}')
                 except Payment.DoesNotExist:
-                    payment = Payment.objects.select_related('order', 'order__customer').get(
-                        transaction_id=reference
-                    )
+                    # Try by transaction_id (PayChangu's tx_ref)
+                    try:
+                        payment = Payment.objects.select_related('order', 'order__customer').get(
+                            transaction_id=reference
+                        )
+                        logger.info(f'Found payment by transaction_id: {payment.id}')
+                    except Payment.DoesNotExist:
+                        # Try to find by order_id extracted from the data
+                        logger.warning(f'Payment not found for reference: {reference}')
+                        webhook_log.reference = f'{reference}_not_found'
+                        webhook_log.save()
+                        return Response({'status': 'ok', 'message': 'Reference not found'}, status=200)
 
                 logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}')
 
@@ -490,6 +512,8 @@ class PaymentViewSet(viewsets.ViewSet):
                     distributed = _distribute_to_wallet(payment, transaction_id, data)
                     if not distributed:
                         logger.info('Webhook: payment already distributed')
+                    else:
+                        logger.info('Webhook: payment distributed successfully')
                 elif payment_status == 'failed':
                     payment.status = 'failed'
                     payment.payment_details = data
@@ -502,10 +526,6 @@ class PaymentViewSet(viewsets.ViewSet):
                 else:
                     logger.warning(f'Unknown webhook status: {payment_status}')
 
-            except Payment.DoesNotExist:
-                logger.warning(f'Webhook for unknown reference: {reference}')
-                webhook_log.reference = f'{reference}_not_found'
-                webhook_log.save()
             except Exception as e:
                 logger.error(f'Webhook processing error: {e}', exc_info=True)
         else:
@@ -706,6 +726,53 @@ class PaymentViewSet(viewsets.ViewSet):
             'order_id': payment.order.id,
             'wallet_balance': float(wallet.balance),
             'restaurant_amount': float(payment.restaurant_amount),
+        })
+
+    # ── SYNC PAYMENT (new endpoint for manual sync) ───────────────────────────
+
+    @action(detail=False, methods=['post'])
+    def sync_payment(self, request):
+        """Manually sync a payment by order ID"""
+        order_id = request.data.get('order_id')
+        
+        if not order_id:
+            return Response({'error': 'order_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            order = Order.objects.get(id=order_id)
+            payment = Payment.objects.get(order=order)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Payment.DoesNotExist:
+            return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # If payment is already completed
+        if payment.status == 'completed':
+            wallet = _get_wallet_for_order(order)
+            return Response({
+                'status': 'already_completed', 
+                'order_id': order_id,
+                'wallet_balance': float(wallet.balance)
+            })
+        
+        # Call PayChangu to verify
+        paychangu_ref = payment.transaction_id or payment.reference
+        remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
+        
+        if remote_status in ('completed', 'successful', 'success'):
+            _distribute_to_wallet(payment, transaction_id, raw_data)
+            wallet = _get_wallet_for_order(order)
+            return Response({
+                'status': 'success',
+                'message': 'Payment synced successfully',
+                'order_id': order_id,
+                'wallet_balance': float(wallet.balance)
+            })
+        
+        return Response({
+            'status': 'pending', 
+            'message': 'Payment still pending',
+            'remote_status': remote_status
         })
 
     # ── MY PAYMENTS ───────────────────────────────────────────────────────────
