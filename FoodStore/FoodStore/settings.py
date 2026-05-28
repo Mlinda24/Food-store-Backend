@@ -2,6 +2,9 @@ from pathlib import Path
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +32,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_yasg',
     'whitenoise.runserver_nostatic',
+    'cloudinary_storage',  # Add this BEFORE cloudinary
+    'cloudinary',          # Add this
     'accounts',
     'restaurants',
     'orders',
@@ -63,7 +68,6 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# Middleware configuration - CommonMiddleware enabled for production
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
@@ -76,29 +80,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# CORS Configuration - Production ready
+# CORS Configuration
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
     CORS_ALLOW_CREDENTIALS = True
-    CORS_ALLOW_METHODS = [
-        'DELETE',
-        'GET',
-        'OPTIONS',
-        'PATCH',
-        'POST',
-        'PUT',
-    ]
-    CORS_ALLOW_HEADERS = [
-        'accept',
-        'accept-encoding',
-        'authorization',
-        'content-type',
-        'dnt',
-        'origin',
-        'user-agent',
-        'x-csrftoken',
-        'x-requested-with',
-    ]
 else:
     CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://your-frontend.onrender.com').split(',')
     CORS_ALLOW_CREDENTIALS = True
@@ -115,13 +100,13 @@ CSRF_TRUSTED_ORIGINS = [
     'http://10.0.2.2:8000',
 ]
 
-# Security settings - Production ready with HTTPS
+# Security settings
 if not DEBUG:
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_BROWSER_XSS_FILTER = True
-    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -162,15 +147,14 @@ WSGI_APPLICATION = 'FoodStore.wsgi.application'
 
 import dj_database_url
 
-# Database - Use Render PostgreSQL for production, SQLite for local development
-# The Render PostgreSQL connection string
+# Database - Use Render PostgreSQL for production
 RENDER_DB_URL = 'postgresql://food_store_db_user:r1aswa8lKcQBta3DsqoK4qdlbmcISYfT@dpg-d81q2nlckfvc73fettu0-a/food_store_db'
 
 DATABASES = {
     'default': dj_database_url.config(
         default=os.environ.get('DATABASE_URL', RENDER_DB_URL),
         conn_max_age=600,
-        ssl_require=not DEBUG,  # Require SSL in production
+        ssl_require=not DEBUG,
     )
 }
 
@@ -192,7 +176,28 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# Media files
+# ============ CLOUDINARY CONFIGURATION ============
+# Cloudinary configuration for media files
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY'),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET'),
+    'SECURE': True,  # Use HTTPS
+}
+
+# Configure Cloudinary
+cloudinary.config(
+    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
+    api_key=os.environ.get('CLOUDINARY_API_KEY'),
+    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
+    secure=True
+)
+
+# Use Cloudinary for media files in production
+if not DEBUG:
+    DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+    
+# Media files configuration (local fallback for development)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
@@ -203,8 +208,7 @@ PAYCHANGU_PUBLIC_KEY = os.environ.get('PAYCHANGU_PUBLIC_KEY', '')
 PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY', '')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
 
-# ============ WEBHOOK CONFIGURATION - Production HTTPS ============
-# Use environment variable for webhook URL (Render will set this)
+# ============ WEBHOOK CONFIGURATION ============
 WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://your-app.onrender.com')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 
