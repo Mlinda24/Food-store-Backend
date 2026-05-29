@@ -202,8 +202,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             'total_price': total_price,
             'delivery_address': delivery_address,
             'note': request.data.get('note', ''),
-            # IMPORTANT: always start as pending / unpaid
-            # status only moves to 'confirmed' after payment AND restaurant confirmation
             'status': 'pending',
             'payment_status': 'unpaid',
         }
@@ -235,9 +233,20 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['patch'])
     def update_status(self, request, pk=None):
-        order = self.get_object()
+        try:
+            order = self.get_object()
+        except Exception as e:
+            return Response(
+                {'error': f'Order not found: {str(e)}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
         new_status = request.data.get('status')
-        old_status = order.status
+        if not new_status:
+            return Response(
+                {'error': 'Status is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         valid_statuses = [
             'pending', 'confirmed', 'preparing',
@@ -249,38 +258,33 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ──────────────────────────────────────────────────────────────────────
-        # PAYMENT GUARD: only allow moving past 'pending' if the order
-        # has been paid. The webhook sets payment_status='paid'
-        # ──────────────────────────────────────────────────────────────────────
+        old_status = order.status
+
+        # Check if order is paid before allowing confirmation
         paid_statuses = {'confirmed', 'preparing', 'ready', 'picked_up', 'delivered'}
         if new_status in paid_statuses:
-            order_payment_status = getattr(order, 'payment_status', None)
-            if order_payment_status != 'paid':
+            if order.payment_status != 'paid':
                 return Response(
                     {
-                        'error': (
-                            f"Cannot set status to '{new_status}' — "
-                            "order has not been paid yet."
-                        )
+                        'error': f"Cannot set status to '{new_status}' — order has not been paid yet.",
+                        'payment_status': order.payment_status,
+                        'current_status': order.status,
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # ──────────────────────────────────────────────────────────────────────
-        # CREDIT WALLET WHEN ORDER IS CONFIRMED BY RESTAURANT
-        # This ensures restaurant only gets paid for orders they confirm
-        # ──────────────────────────────────────────────────────────────────────
-        if new_status == 'confirmed' and old_status != 'confirmed':
-            success = self._credit_wallet_on_confirmation(order)
-            if not success:
-                return Response(
-                    {'error': 'Failed to credit wallet. Please try again.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
+        # Update the status
         order.status = new_status
         order.save()
+
+        logger.info(f'Order #{order.id} status updated from {old_status} to {new_status}')
+
+        # Credit wallet when order is confirmed by restaurant
+        if new_status == 'confirmed' and old_status != 'confirmed':
+            logger.info(f'Order #{order.id} confirmed - crediting restaurant wallet')
+            success = self._credit_wallet_on_confirmation(order)
+            if not success:
+                logger.warning(f'Failed to credit wallet for order #{order.id}')
 
         # Send notification to customer about status change
         try:
@@ -300,12 +304,10 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(order)
         return Response({
-            'status': 'success',
-            'order_status': order.status,
-            'payment_status': order.payment_status,
+            'success': True,
             'message': f'Order status updated to {new_status}',
-            'data': serializer.data
-        })
+            'order': serializer.data
+        }, status=status.HTTP_200_OK)
 
     def _credit_wallet_on_confirmation(self, order):
         """Credit restaurant wallet when order is confirmed by restaurant owner"""
@@ -337,10 +339,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 total_amount = Decimal(str(payment.amount))
                 platform_fee_percent = Decimal('10.00')
                 platform_fee = (total_amount * platform_fee_percent) / Decimal('100')
-                restaurant_amount = payment.pending_restaurant_amount
-                
-                if restaurant_amount == 0:
-                    restaurant_amount = total_amount - platform_fee
+                restaurant_amount = payment.pending_restaurant_amount if hasattr(payment, 'pending_restaurant_amount') and payment.pending_restaurant_amount else total_amount - platform_fee
                 
                 # Credit the wallet
                 wallet.balance += restaurant_amount
@@ -442,36 +441,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             orders = Order.objects.filter(
                 restaurant_id=restaurant.id,
                 status='pending',
-                payment_status='paid'
-            ).order_by('-created')
-            serializer = self.get_serializer(orders, many=True)
-            return Response(serializer.data)
-        except Restaurant.DoesNotExist:
-            return Response(
-                {'error': 'No restaurant found for this user'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-    @action(detail=False, methods=['get'])
-    def confirmed_orders(self, request):
-        """Get confirmed orders for restaurant owner"""
-        if not RESTAURANTS_AVAILABLE:
-            return Response(
-                {'error': 'Restaurants module not available'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        
-        if not hasattr(request.user, 'role') or request.user.role != 'restaurant':
-            return Response(
-                {'error': 'Only restaurant owners can access this endpoint'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        
-        try:
-            restaurant = Restaurant.objects.get(owner=request.user)
-            orders = Order.objects.filter(
-                restaurant_id=restaurant.id,
-                status='confirmed',
                 payment_status='paid'
             ).order_by('-created')
             serializer = self.get_serializer(orders, many=True)
