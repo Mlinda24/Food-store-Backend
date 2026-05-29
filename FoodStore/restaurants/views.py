@@ -216,7 +216,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        MIN_WITHDRAWAL = Decimal('100.00')
+        MIN_WITHDRAWAL = Decimal('50.00')
         if amount < MIN_WITHDRAWAL:
             return Response(
                 {'error': f'Minimum withdrawal is MK{MIN_WITHDRAWAL}'},
@@ -258,6 +258,37 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             description=f'Withdrawal to {phone_number} via {provider}',
         )
 
+        # ── Check if using real PayChangu (or mock mode) ──────────────────────
+        USE_REAL_PAYOUTS = settings.PAYCHANGU_SECRET_KEY and settings.PAYCHANGU_SECRET_KEY != ''
+        
+        if not USE_REAL_PAYOUTS:
+            # Mock mode - just deduct from wallet and return success
+            logger.info(f'MOCK MODE: Withdrawal of {amount} to {phone_cleaned}')
+            
+            transaction.status = 'completed'
+            transaction.metadata = {
+                'mock_withdrawal': True,
+                'phone_number': phone_number,
+                'provider': provider,
+                'message': 'Test mode - withdrawal processed without actual money transfer',
+            }
+            transaction.save()
+
+            # Deduct from wallet
+            wallet.balance -= amount
+            wallet.total_withdrawn += amount
+            wallet.save(update_fields=['balance', 'total_withdrawn'])
+
+            return Response({
+                'success': True,
+                'message': f'MK{amount:,.2f} withdrawal processed (Test Mode)',
+                'reference': str(transaction.reference),
+                'amount': float(amount),
+                'new_balance': float(wallet.balance),
+            }, status=status.HTTP_200_OK)
+
+        # ── Real PayChangu withdrawal ─────────────────────────────────────────
+        
         # Map provider to PayChangu format
         provider_map = {
             'mpamba': 'tnm',
@@ -265,23 +296,17 @@ class RestaurantViewSet(viewsets.ModelViewSet):
         }
         paychangu_provider = provider_map.get(provider, 'tnm')
         
-        # Generate a unique ref_id for the mobile money operator
-        ref_id = str(uuid.uuid4())[:15]
-        
-        # Generate charge_id
-        charge_id = f'CHARGE-{transaction.reference}'[:30]
-
-        # ── Correct PayChangu payout payload ───────────────────────────────────
+        # Payload for PayChangu API
         payout_data = {
             'amount': str(amount),
             'currency': 'MWK',
-            'mobile': phone_cleaned,  # 9 digits without leading zero
-            'mobile_money_operator': paychangu_provider,
-            'mobile_money_operator_ref_id': ref_id,  # Required field
-            'charge_id': charge_id,  # Required field
+            'phone_number': phone_cleaned,
+            'provider': paychangu_provider,
             'reference': str(transaction.reference),
             'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/withdrawal-webhook/',
-            'narration': f'Withdrawal for restaurant {restaurant.name}',
+            'description': f'Withdrawal for restaurant {restaurant.name}',
+            'customer_name': restaurant.name,
+            'customer_email': restaurant.owner.email if restaurant.owner else '',
         }
 
         headers = {
@@ -290,100 +315,97 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             'Accept': 'application/json',
         }
 
-        url = f'{settings.PAYCHANGU_BASE_URL}/mobile-money/payouts/initialize'
+        # Try multiple possible endpoints that PayChangu might use
+        endpoints_to_try = [
+            '/api/v1/transfer',
+            '/api/v1/disburse',
+            '/api/v1/payout',
+            '/transfer',
+            '/disburse',
+            '/payout',
+            '/mobile-money/payout',
+            '/api/v1/mobile-money/payout',
+        ]
         
-        logger.info(f'Processing withdrawal: {amount} to {phone_cleaned}')
-        logger.info(f'Endpoint: {url}')
-        logger.info(f'Payload: {json.dumps(payout_data)}')
-
-        try:
-            response = requests.post(
-                url,
-                json=payout_data,
-                headers=headers,
-                timeout=30,
-            )
+        success = False
+        response_data = None
+        used_endpoint = None
+        
+        for endpoint in endpoints_to_try:
+            try:
+                url = f'{settings.PAYCHANGU_BASE_URL}{endpoint}'
+                logger.info(f'Trying withdrawal endpoint: {url}')
+                logger.info(f'Payload: {json.dumps(payout_data)}')
+                
+                response = requests.post(
+                    url,
+                    json=payout_data,
+                    headers=headers,
+                    timeout=30,
+                )
+                
+                logger.info(f'Response status: {response.status_code}')
+                logger.info(f'Response body: {response.text}')
+                
+                if response.status_code in (200, 201, 202):
+                    response_data = response.json()
+                    success = True
+                    used_endpoint = endpoint
+                    break
+                else:
+                    logger.warning(f'Endpoint {endpoint} failed: {response.status_code}')
+                    
+            except requests.RequestException as e:
+                logger.error(f'Request error on {endpoint}: {e}')
+                continue
+        
+        if success and response_data:
+            data = response_data.get('data', response_data)
             
-            logger.info(f'Response status: {response.status_code}')
-            logger.info(f'Response body: {response.text}')
-            
-            if response.status_code in (200, 201, 202):
-                response_data = response.json()
-                data = response_data.get('data', response_data)
-                
-                # Update transaction with payout info
-                transaction.status = 'completed'
-                transaction.metadata = {
-                    'payout_id': data.get('id') or data.get('payout_id'),
-                    'payout_reference': data.get('reference'),
-                    'provider_response': response_data,
-                    'phone_number': phone_number,
-                    'provider': provider,
-                    'status': data.get('status'),
-                    'ref_id': ref_id,
-                    'charge_id': charge_id,
-                }
-                transaction.save()
+            # Update transaction with payout info
+            transaction.status = 'completed'
+            transaction.metadata = {
+                'payout_id': data.get('id') or data.get('transfer_id'),
+                'payout_reference': data.get('reference'),
+                'provider_response': response_data,
+                'phone_number': phone_number,
+                'provider': provider,
+                'status': data.get('status'),
+                'endpoint_used': used_endpoint,
+            }
+            transaction.save()
 
-                # Deduct from wallet
-                wallet.balance -= amount
-                wallet.total_withdrawn += amount
-                wallet.save(update_fields=['balance', 'total_withdrawn'])
+            # Deduct from wallet
+            wallet.balance -= amount
+            wallet.total_withdrawn += amount
+            wallet.save(update_fields=['balance', 'total_withdrawn'])
 
-                logger.info(f'Withdrawal successful: {amount} to {phone_cleaned}, tx={transaction.reference}')
+            logger.info(f'Withdrawal successful: {amount} to {phone_cleaned}, tx={transaction.reference}')
 
-                return Response({
-                    'success': True,
-                    'message': f'MK{amount:,.2f} sent to {phone_number} successfully',
-                    'reference': str(transaction.reference),
-                    'payout_reference': data.get('reference'),
-                    'amount': float(amount),
-                    'new_balance': float(wallet.balance),
-                }, status=status.HTTP_200_OK)
-            else:
-                # Payout failed - mark transaction as failed
-                transaction.status = 'failed'
-                transaction.metadata = {
-                    'error': response.text,
-                    'status_code': response.status_code,
-                    'phone_number': phone_number,
-                    'provider': provider,
-                }
-                transaction.save()
-                
-                logger.error(f'Withdrawal failed: {response.text}')
-                
-                # Try to parse error message
-                try:
-                    error_data = response.json()
-                    error_message = error_data.get('message', {})
-                    if isinstance(error_message, dict):
-                        error_text = ', '.join([f'{k}: {v}' for k, v in error_message.items()])
-                    else:
-                        error_text = str(error_message)
-                except:
-                    error_text = response.text
-                
-                return Response({
-                    'error': 'Withdrawal failed. Please try again.',
-                    'details': error_text,
-                }, status=status.HTTP_400_BAD_REQUEST)
-                
-        except requests.RequestException as e:
+            return Response({
+                'success': True,
+                'message': f'MK{amount:,.2f} sent to {phone_number} successfully',
+                'reference': str(transaction.reference),
+                'payout_reference': data.get('reference'),
+                'amount': float(amount),
+                'new_balance': float(wallet.balance),
+            }, status=status.HTTP_200_OK)
+        else:
+            # Payout failed - mark transaction as failed
             transaction.status = 'failed'
             transaction.metadata = {
-                'error': str(e),
+                'error': 'All payout endpoints failed',
                 'phone_number': phone_number,
                 'provider': provider,
             }
             transaction.save()
             
-            logger.error(f'Withdrawal request failed: {e}')
+            logger.error(f'Withdrawal failed for transaction {transaction.reference}')
             
             return Response({
-                'error': 'Payment service unavailable. Please try again.',
-                'details': str(e),
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'error': 'Withdrawal failed. Please try again.',
+                'reference': str(transaction.reference),
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ─── Menu Item ViewSet (owner) ────────────────────────────────────────────────
