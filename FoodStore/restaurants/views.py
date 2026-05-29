@@ -216,7 +216,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        MIN_WITHDRAWAL = Decimal('100.00')  # Changed to 100 to match frontend
+        MIN_WITHDRAWAL = Decimal('100.00')
         if amount < MIN_WITHDRAWAL:
             return Response(
                 {'error': f'Minimum withdrawal is MK{MIN_WITHDRAWAL}'},
@@ -261,8 +261,9 @@ class RestaurantViewSet(viewsets.ModelViewSet):
         }
         paychangu_provider = provider_map.get(provider, 'tnm')
 
-        # ── Process withdrawal with PayChangu ─────────────────────────────────
-
+        # ── PayChangu payout payload (correct format) ─────────────────────────
+        
+        # According to PayChangu documentation, use /mobile-money/payouts/initialize
         payout_data = {
             'amount': str(amount),
             'currency': 'MWK',
@@ -270,7 +271,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             'provider': paychangu_provider,
             'reference': str(transaction.reference),
             'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/withdrawal-webhook/',
-            'description': f'Withdrawal for restaurant {restaurant.name}',
+            'narration': f'Withdrawal for restaurant {restaurant.name}',
         }
 
         headers = {
@@ -279,27 +280,39 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             'Accept': 'application/json',
         }
 
+        # ✅ CORRECT endpoint for mobile money payouts
+        PAYOUT_ENDPOINT = '/mobile-money/payouts/initialize'
+        
+        url = f'{settings.PAYCHANGU_BASE_URL}{PAYOUT_ENDPOINT}'
+        
+        logger.info(f'Processing withdrawal: {amount} to {phone_cleaned}')
+        logger.info(f'Endpoint: {url}')
+        logger.info(f'Payload: {json.dumps(payout_data)}')
+
         try:
-            # Call PayChangu payout API
             response = requests.post(
-                f'{settings.PAYCHANGU_BASE_URL}/payout',
+                url,
                 json=payout_data,
                 headers=headers,
                 timeout=30,
             )
-
-            if response.status_code in (200, 201):
+            
+            logger.info(f'Response status: {response.status_code}')
+            logger.info(f'Response body: {response.text}')
+            
+            if response.status_code in (200, 201, 202):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
                 
                 # Update transaction with payout info
                 transaction.status = 'completed'
                 transaction.metadata = {
-                    'payout_id': data.get('id'),
+                    'payout_id': data.get('id') or data.get('payout_id'),
                     'payout_reference': data.get('reference'),
                     'provider_response': response_data,
                     'phone_number': phone_cleaned,
                     'provider': provider,
+                    'status': data.get('status'),
                 }
                 transaction.save()
 
@@ -314,11 +327,12 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                     'success': True,
                     'message': f'MK{amount:,.2f} sent to {phone_cleaned} successfully',
                     'reference': str(transaction.reference),
+                    'payout_reference': data.get('reference'),
                     'amount': float(amount),
                     'new_balance': float(wallet.balance),
                 }, status=status.HTTP_200_OK)
             else:
-                # Payout failed - mark transaction as failed
+                # Payout failed
                 transaction.status = 'failed'
                 transaction.metadata = {
                     'error': response.text,
@@ -328,15 +342,14 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 }
                 transaction.save()
                 
-                logger.error(f'Payout failed: {response.text}')
+                logger.error(f'Withdrawal failed: {response.text}')
                 
                 return Response({
                     'error': 'Withdrawal failed. Please try again.',
                     'details': response.text,
                 }, status=status.HTTP_400_BAD_REQUEST)
-
+                
         except requests.RequestException as e:
-            # Network error - mark as failed
             transaction.status = 'failed'
             transaction.metadata = {
                 'error': str(e),
