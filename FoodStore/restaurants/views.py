@@ -6,6 +6,10 @@ from django.utils import timezone
 from django.db.models import Sum
 from decimal import Decimal
 import uuid
+import json
+import requests
+import logging
+from django.conf import settings
 
 from .models import Restaurant, MenuItem, Category, RestaurantWallet, WalletTransaction
 from .serializers import (
@@ -13,6 +17,8 @@ from .serializers import (
     CategorySerializer
 )
 from orders.models import Order
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Restaurant ViewSet ───────────────────────────────────────────────────────
@@ -210,7 +216,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        MIN_WITHDRAWAL = Decimal('1000.00')
+        MIN_WITHDRAWAL = Decimal('100.00')  # Changed to 100 to match frontend
         if amount < MIN_WITHDRAWAL:
             return Response(
                 {'error': f'Minimum withdrawal is MK{MIN_WITHDRAWAL}'},
@@ -238,27 +244,113 @@ class RestaurantViewSet(viewsets.ModelViewSet):
         if not phone_cleaned.startswith('0'):
             phone_cleaned = f'0{phone_cleaned}'
 
-        # ── Process ───────────────────────────────────────────────────────────
-
-        wallet.balance -= amount
-        wallet.total_withdrawn += amount
-        wallet.save(update_fields=['balance', 'total_withdrawn'])
+        # ── Create transaction record ─────────────────────────────────────────
 
         transaction = WalletTransaction.objects.create(
             wallet=wallet,
             transaction_type='debit',
             amount=amount,
-            status='pending',
+            status='processing',
             description=f'Withdrawal to {phone_cleaned} via {provider}',
         )
 
-        return Response({
-            'success':      True,
-            'message':      'Withdrawal request submitted successfully',
-            'reference':    str(transaction.reference),
-            'amount':       float(amount),
-            'new_balance':  float(wallet.balance),
-        }, status=status.HTTP_200_OK)
+        # Map provider to PayChangu format
+        provider_map = {
+            'mpamba': 'tnm',
+            'airtel': 'airtel_money',
+        }
+        paychangu_provider = provider_map.get(provider, 'tnm')
+
+        # ── Process withdrawal with PayChangu ─────────────────────────────────
+
+        payout_data = {
+            'amount': str(amount),
+            'currency': 'MWK',
+            'phone_number': phone_cleaned,
+            'provider': paychangu_provider,
+            'reference': str(transaction.reference),
+            'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/withdrawal-webhook/',
+            'description': f'Withdrawal for restaurant {restaurant.name}',
+        }
+
+        headers = {
+            'Authorization': f'Bearer {settings.PAYCHANGU_SECRET_KEY}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        }
+
+        try:
+            # Call PayChangu payout API
+            response = requests.post(
+                f'{settings.PAYCHANGU_BASE_URL}/payout',
+                json=payout_data,
+                headers=headers,
+                timeout=30,
+            )
+
+            if response.status_code in (200, 201):
+                response_data = response.json()
+                data = response_data.get('data', response_data)
+                
+                # Update transaction with payout info
+                transaction.status = 'completed'
+                transaction.metadata = {
+                    'payout_id': data.get('id'),
+                    'payout_reference': data.get('reference'),
+                    'provider_response': response_data,
+                    'phone_number': phone_cleaned,
+                    'provider': provider,
+                }
+                transaction.save()
+
+                # Deduct from wallet
+                wallet.balance -= amount
+                wallet.total_withdrawn += amount
+                wallet.save(update_fields=['balance', 'total_withdrawn'])
+
+                logger.info(f'Withdrawal successful: {amount} to {phone_cleaned}, tx={transaction.reference}')
+
+                return Response({
+                    'success': True,
+                    'message': f'MK{amount:,.2f} sent to {phone_cleaned} successfully',
+                    'reference': str(transaction.reference),
+                    'amount': float(amount),
+                    'new_balance': float(wallet.balance),
+                }, status=status.HTTP_200_OK)
+            else:
+                # Payout failed - mark transaction as failed
+                transaction.status = 'failed'
+                transaction.metadata = {
+                    'error': response.text,
+                    'status_code': response.status_code,
+                    'phone_number': phone_cleaned,
+                    'provider': provider,
+                }
+                transaction.save()
+                
+                logger.error(f'Payout failed: {response.text}')
+                
+                return Response({
+                    'error': 'Withdrawal failed. Please try again.',
+                    'details': response.text,
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        except requests.RequestException as e:
+            # Network error - mark as failed
+            transaction.status = 'failed'
+            transaction.metadata = {
+                'error': str(e),
+                'phone_number': phone_cleaned,
+                'provider': provider,
+            }
+            transaction.save()
+            
+            logger.error(f'Withdrawal request failed: {e}')
+            
+            return Response({
+                'error': 'Payment service unavailable. Please try again.',
+                'details': str(e),
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─── Menu Item ViewSet (owner) ────────────────────────────────────────────────

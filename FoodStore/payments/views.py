@@ -423,6 +423,63 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    # ── WITHDRAWAL WEBHOOK ────────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    @method_decorator(csrf_exempt)
+    def withdrawal_webhook(self, request):
+        """Handle withdrawal webhook from PayChangu"""
+        logger.info('=== WITHDRAWAL WEBHOOK RECEIVED ===')
+        
+        try:
+            data = request.data
+            reference = data.get('reference')
+            status_webhook = data.get('status')
+            
+            logger.info(f'Withdrawal webhook data: {json.dumps(data, indent=2)}')
+            
+            if reference:
+                try:
+                    # Find the withdrawal transaction
+                    transaction = WalletTransaction.objects.get(reference=reference)
+                    logger.info(f'Found withdrawal transaction: {transaction.reference}, current status: {transaction.status}')
+                    
+                    if status_webhook in ('completed', 'successful', 'success'):
+                        transaction.status = 'completed'
+                        transaction.metadata = {
+                            **(transaction.metadata or {}),
+                            'webhook_data': data,
+                            'completed_at': timezone.now().isoformat(),
+                        }
+                        transaction.save()
+                        logger.info(f'Withdrawal {reference} completed via webhook')
+                        
+                    elif status_webhook == 'failed':
+                        transaction.status = 'failed'
+                        transaction.metadata = {
+                            **(transaction.metadata or {}),
+                            'webhook_data': data,
+                            'failure_reason': data.get('message', 'Unknown'),
+                            'failed_at': timezone.now().isoformat(),
+                        }
+                        transaction.save()
+                        
+                        # Refund the wallet if transaction was already deducted
+                        if transaction.wallet and transaction.status == 'processing':
+                            transaction.wallet.balance += transaction.amount
+                            transaction.wallet.save()
+                            logger.info(f'Refunded wallet for failed withdrawal {reference}')
+                            
+                except WalletTransaction.DoesNotExist:
+                    logger.warning(f'Withdrawal transaction not found for reference: {reference}')
+                except Exception as e:
+                    logger.error(f'Error processing withdrawal webhook: {e}', exc_info=True)
+                    
+        except Exception as e:
+            logger.error(f'Withdrawal webhook processing error: {e}', exc_info=True)
+            
+        return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
+
     # ── WEBHOOK ───────────────────────────────────────────────────────────────
 
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
