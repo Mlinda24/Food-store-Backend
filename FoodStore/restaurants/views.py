@@ -235,14 +235,18 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Clean phone number - remove any non-digit characters
         phone_cleaned = ''.join(filter(str.isdigit, phone_number))
-        if len(phone_cleaned) < 9:
+        
+        # Remove leading '0' if present, PayChangu wants 9 digits without leading zero
+        if phone_cleaned.startswith('0'):
+            phone_cleaned = phone_cleaned[1:]
+        
+        if len(phone_cleaned) != 9:
             return Response(
-                {'error': 'Please enter a valid phone number'},
+                {'error': 'Please enter a valid 9-digit phone number (e.g., 881779699)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not phone_cleaned.startswith('0'):
-            phone_cleaned = f'0{phone_cleaned}'
 
         # ── Create transaction record ─────────────────────────────────────────
 
@@ -251,7 +255,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             transaction_type='debit',
             amount=amount,
             status='processing',
-            description=f'Withdrawal to {phone_cleaned} via {provider}',
+            description=f'Withdrawal to {phone_number} via {provider}',
         )
 
         # Map provider to PayChangu format
@@ -260,15 +264,21 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             'airtel': 'airtel_money',
         }
         paychangu_provider = provider_map.get(provider, 'tnm')
-
-        # ── PayChangu payout payload (correct format) ─────────────────────────
         
-        # According to PayChangu documentation, use /mobile-money/payouts/initialize
+        # Generate a unique ref_id for the mobile money operator
+        ref_id = str(uuid.uuid4())[:15]
+        
+        # Generate charge_id
+        charge_id = f'CHARGE-{transaction.reference}'[:30]
+
+        # ── Correct PayChangu payout payload ───────────────────────────────────
         payout_data = {
             'amount': str(amount),
             'currency': 'MWK',
-            'phone_number': phone_cleaned,
-            'provider': paychangu_provider,
+            'mobile': phone_cleaned,  # 9 digits without leading zero
+            'mobile_money_operator': paychangu_provider,
+            'mobile_money_operator_ref_id': ref_id,  # Required field
+            'charge_id': charge_id,  # Required field
             'reference': str(transaction.reference),
             'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/withdrawal-webhook/',
             'narration': f'Withdrawal for restaurant {restaurant.name}',
@@ -280,10 +290,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
             'Accept': 'application/json',
         }
 
-        # ✅ CORRECT endpoint for mobile money payouts
-        PAYOUT_ENDPOINT = '/mobile-money/payouts/initialize'
-        
-        url = f'{settings.PAYCHANGU_BASE_URL}{PAYOUT_ENDPOINT}'
+        url = f'{settings.PAYCHANGU_BASE_URL}/mobile-money/payouts/initialize'
         
         logger.info(f'Processing withdrawal: {amount} to {phone_cleaned}')
         logger.info(f'Endpoint: {url}')
@@ -310,9 +317,11 @@ class RestaurantViewSet(viewsets.ModelViewSet):
                     'payout_id': data.get('id') or data.get('payout_id'),
                     'payout_reference': data.get('reference'),
                     'provider_response': response_data,
-                    'phone_number': phone_cleaned,
+                    'phone_number': phone_number,
                     'provider': provider,
                     'status': data.get('status'),
+                    'ref_id': ref_id,
+                    'charge_id': charge_id,
                 }
                 transaction.save()
 
@@ -325,35 +334,46 @@ class RestaurantViewSet(viewsets.ModelViewSet):
 
                 return Response({
                     'success': True,
-                    'message': f'MK{amount:,.2f} sent to {phone_cleaned} successfully',
+                    'message': f'MK{amount:,.2f} sent to {phone_number} successfully',
                     'reference': str(transaction.reference),
                     'payout_reference': data.get('reference'),
                     'amount': float(amount),
                     'new_balance': float(wallet.balance),
                 }, status=status.HTTP_200_OK)
             else:
-                # Payout failed
+                # Payout failed - mark transaction as failed
                 transaction.status = 'failed'
                 transaction.metadata = {
                     'error': response.text,
                     'status_code': response.status_code,
-                    'phone_number': phone_cleaned,
+                    'phone_number': phone_number,
                     'provider': provider,
                 }
                 transaction.save()
                 
                 logger.error(f'Withdrawal failed: {response.text}')
                 
+                # Try to parse error message
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('message', {})
+                    if isinstance(error_message, dict):
+                        error_text = ', '.join([f'{k}: {v}' for k, v in error_message.items()])
+                    else:
+                        error_text = str(error_message)
+                except:
+                    error_text = response.text
+                
                 return Response({
                     'error': 'Withdrawal failed. Please try again.',
-                    'details': response.text,
+                    'details': error_text,
                 }, status=status.HTTP_400_BAD_REQUEST)
                 
         except requests.RequestException as e:
             transaction.status = 'failed'
             transaction.metadata = {
                 'error': str(e),
-                'phone_number': phone_cleaned,
+                'phone_number': phone_number,
                 'provider': provider,
             }
             transaction.save()
