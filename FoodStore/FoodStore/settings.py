@@ -69,14 +69,17 @@ MIDDLEWARE = [
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
-else:
-    CORS_ALLOWED_ORIGINS = [
-        o.strip()
-        for o in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
-        if o.strip()
-    ]
+# Allow all origins in production (for Flutter web/app)
+CORS_ALLOW_ALL_ORIGINS = True  # Set to True temporarily for testing
+
+# If you want to specify specific origins, use this instead:
+# CORS_ALLOWED_ORIGINS = [
+#     "https://food-store-backend-4eo6.onrender.com",
+#     "http://localhost:8080",
+#     "http://127.0.0.1:8080",
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+# ]
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT']
@@ -113,8 +116,8 @@ else:
 
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SAMESITE = 'None'  # Changed to 'None' for cross-origin requests
+CSRF_COOKIE_SAMESITE = 'None'      # Changed to 'None' for cross-origin requests
 
 # ─── URLs / WSGI ─────────────────────────────────────────────────────────────
 
@@ -200,14 +203,12 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# ─── Cloudinary (media storage) - FIXED ──────────────────────────────────────
+# ─── Cloudinary (media storage) ──────────────────────────────────────────────
 
-# Get Cloudinary credentials from environment
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', 'dvtfdu0yq')
 CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '997758335612991')
 CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', 'vM7te6Bd-wO_78r_r9qP4cM0q-0')
 
-# Configure Cloudinary
 cloudinary.config(
     cloud_name=CLOUDINARY_CLOUD_NAME,
     api_key=CLOUDINARY_API_KEY,
@@ -222,10 +223,8 @@ CLOUDINARY_STORAGE = {
     'SECURE': True,
 }
 
-# FORCE Cloudinary for ALL file storage - THIS IS CRITICAL
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
-# Also configure storages for Django 4.2+
 STORAGES = {
     'default': {
         'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
@@ -235,11 +234,8 @@ STORAGES = {
     },
 }
 
-# Keep MEDIA_URL/ROOT for compatibility (Cloudinary overrides this)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-
-# Create media directory if it doesn't exist
 MEDIA_ROOT.mkdir(exist_ok=True)
 
 # ─── Payment ─────────────────────────────────────────────────────────────────

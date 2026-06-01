@@ -465,6 +465,147 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    # ── TEST CONFIRM PAYMENT ───────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'])
+    def test_confirm_payment(self, request):
+        """Manually confirm a payment for testing"""
+        order_id = request.data.get('order_id')
+        reference = request.data.get('reference')
+
+        if not order_id and not reference:
+            return Response(
+                {'error': 'order_id or reference required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            if order_id:
+                payment = Payment.objects.select_related('order', 'order__customer').get(order_id=order_id)
+            else:
+                payment = Payment.objects.select_related('order', 'order__customer').get(reference=reference)
+        except Payment.DoesNotExist:
+            return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if payment.order.customer != request.user and not request.user.is_staff:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Check if already distributed
+        if payment.distributed_to_wallets:
+            return Response({
+                'status': 'already_completed',
+                'message': 'Payment already processed',
+                'order_id': payment.order.id,
+            })
+
+        # Process the payment
+        transaction_id = f'MANUAL_{uuid.uuid4().hex[:8]}'
+        _distribute_to_wallet(payment, transaction_id)
+        payment.refresh_from_db()
+
+        wallet = _get_wallet_for_order(payment.order)
+        return Response({
+            'status': 'completed',
+            'message': 'Payment confirmed manually',
+            'order_id': payment.order.id,
+            'wallet_balance': float(wallet.balance),
+            'restaurant_amount': float(payment.restaurant_amount),
+        })
+
+    # ── SYNC PAYMENT ──────────────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'])
+    def sync_payment(self, request):
+        """Manually sync a payment by order ID"""
+        order_id = request.data.get('order_id')
+        
+        if not order_id:
+            return Response({'error': 'order_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            order = Order.objects.get(id=order_id)
+            payment = Payment.objects.get(order=order)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Payment.DoesNotExist:
+            return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # If payment is already completed
+        if payment.status == 'completed':
+            wallet = _get_wallet_for_order(order)
+            return Response({
+                'status': 'already_completed', 
+                'order_id': order_id,
+                'wallet_balance': float(wallet.balance)
+            })
+        
+        # Call PayChangu to verify
+        paychangu_ref = payment.transaction_id or payment.reference
+        remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
+        
+        if remote_status in ('completed', 'successful', 'success'):
+            _distribute_to_wallet(payment, transaction_id, raw_data)
+            wallet = _get_wallet_for_order(order)
+            return Response({
+                'status': 'success',
+                'message': 'Payment synced successfully',
+                'order_id': order_id,
+                'wallet_balance': float(wallet.balance)
+            })
+        
+        return Response({
+            'status': 'pending', 
+            'message': 'Payment still pending',
+            'remote_status': remote_status
+        })
+
+    # ── DEMO CONFIRM PAYMENT ───────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'])
+    def demo_confirm_payment(self, request):
+        """Demo mode - always confirms payment"""
+        order_id = request.data.get('order_id')
+        
+        if not order_id:
+            return Response({'error': 'order_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            order = Order.objects.get(id=order_id, customer=request.user)
+            payment, created = Payment.objects.get_or_create(
+                order=order,
+                defaults={
+                    'amount': order.total_price,
+                    'method': 'demo',
+                    'reference': f'DEMO-{order.id}-{uuid.uuid4().hex[:8]}',
+                    'status': 'completed',
+                    'paid_at': timezone.now(),
+                }
+            )
+            
+            if not created and payment.status != 'completed':
+                payment.status = 'completed'
+                payment.paid_at = timezone.now()
+                payment.save()
+            
+            # Distribute to wallet
+            _distribute_to_wallet(payment, f'DEMO_{uuid.uuid4().hex[:8]}')
+            payment.refresh_from_db()
+            
+            wallet = _get_wallet_for_order(order)
+            return Response({
+                'status': 'success',
+                'message': 'Demo payment successful',
+                'order_id': order_id,
+                'wallet_balance': float(wallet.balance),
+                'restaurant_amount': float(payment.restaurant_amount),
+                'reference': payment.reference
+            })
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f'Demo payment error: {e}')
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
     # ── WITHDRAWAL WEBHOOK ────────────────────────────────────────────────────
 
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
