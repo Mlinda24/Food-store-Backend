@@ -433,6 +433,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
                 
+                # Store PayChangu's tx_ref as transaction_id for webhook matching
                 paychangu_tx_ref = data.get('tx_ref') or data.get('reference')
                 payment.transaction_id = paychangu_tx_ref
                 payment.payment_details = response_data
@@ -446,7 +447,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 )
                 
                 logger.info(f'Payment initiated. Checkout URL: {checkout_url}')
-                logger.info(f'PayChangu TX Ref: {paychangu_tx_ref}')
+                logger.info(f'Stored PayChangu tx_ref: {paychangu_tx_ref}')
                 
                 return Response(
                     {
@@ -713,104 +714,93 @@ class PaymentViewSet(viewsets.ViewSet):
 
         event_data = data.get('data', data)
         
-        # Try multiple possible reference fields
-        reference = (
-            event_data.get('reference') or 
-            event_data.get('tx_ref') or 
-            event_data.get('order_id') or
-            event_data.get('transaction_id') or
-            data.get('reference') or 
-            data.get('tx_ref')
-        )
+        # Get PayChangu's reference
+        paychangu_reference = event_data.get('reference') or event_data.get('tx_ref')
         
-        # Also try to extract from custom data
-        if not reference and 'custom_data' in event_data:
-            custom = event_data.get('custom_data', {})
-            reference = custom.get('reference')
+        # Also try to get custom data
+        custom_data = event_data.get('custom_data', {})
+        our_reference = custom_data.get('reference')
+        
+        # Try to find payment by PayChangu reference or our reference
+        payment = None
+        
+        if paychangu_reference:
+            # Try to find payment by transaction_id (PayChangu's reference)
+            try:
+                payment = Payment.objects.select_related('order', 'order__customer').get(
+                    transaction_id=paychangu_reference
+                )
+                logger.info(f'Found payment by transaction_id: {payment.id}')
+            except Payment.DoesNotExist:
+                pass
+        
+        if not payment and our_reference:
+            # Try to find by our reference
+            try:
+                payment = Payment.objects.select_related('order', 'order__customer').get(
+                    reference=our_reference
+                )
+                logger.info(f'Found payment by reference: {payment.id}')
+            except Payment.DoesNotExist:
+                pass
+        
+        if not payment and paychangu_reference:
+            # Try partial match on reference
+            try:
+                payment = Payment.objects.select_related('order', 'order__customer').filter(
+                    reference__icontains=paychangu_reference[-8:] if len(paychangu_reference) >= 8 else paychangu_reference
+                ).first()
+                if payment:
+                    logger.info(f'Found payment by partial match: {payment.id}')
+            except:
+                pass
         
         payment_status = event_data.get('status') or data.get('status')
-        transaction_id = (
-            event_data.get('transaction_id') or 
-            event_data.get('id') or 
-            data.get('transaction_id')
-        )
+        transaction_id = event_data.get('transaction_id') or data.get('transaction_id') or paychangu_reference
 
         webhook_log = WebhookLog.objects.create(
-            reference=reference or 'unknown',
+            reference=paychangu_reference or our_reference or 'unknown',
             payload=data,
         )
-        logger.info(f'Webhook logged: ID={webhook_log.id}, reference={reference}, status={payment_status}')
+        logger.info(f'Webhook logged: ID={webhook_log.id}')
 
-        if reference:
-            try:
-                # Try to find by our reference (FOOD-XXX)
-                try:
-                    payment = Payment.objects.select_related('order', 'order__customer').get(
-                        reference=reference
-                    )
-                    logger.info(f'Found payment by reference: {payment.id}')
-                except Payment.DoesNotExist:
-                    # Try by transaction_id
-                    try:
-                        payment = Payment.objects.select_related('order', 'order__customer').get(
-                            transaction_id=reference
-                        )
-                        logger.info(f'Found payment by transaction_id: {payment.id}')
-                    except Payment.DoesNotExist:
-                        # Try partial match on reference
-                        try:
-                            payment = Payment.objects.select_related('order', 'order__customer').filter(
-                                reference__icontains=reference[-8:] if len(reference) >= 8 else reference
-                            ).first()
-                            if payment:
-                                logger.info(f'Found payment by partial match: {payment.id}')
-                        except:
-                            pass
-                        
-                        if not payment:
-                            logger.warning(f'Payment not found for reference: {reference}')
-                            webhook_log.reference = f'{reference}_not_found'
-                            webhook_log.save()
-                            return Response({'status': 'ok', 'message': 'Reference not found'}, status=200)
+        if payment:
+            logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}, Current Status={payment.status}')
 
-                logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}')
-
-                # Update payment status based on webhook
-                if payment_status in ('completed', 'successful', 'success', 'paid'):
-                    if payment.status != 'completed':
-                        payment.status = 'completed'
-                        payment.transaction_id = transaction_id or payment.transaction_id
-                        payment.payment_details = data
-                        payment.paid_at = timezone.now()
-                        payment.save()
-                        logger.info(f'Payment {payment.reference} marked as completed')
-                        
-                        # Update order payment status
-                        order = payment.order
-                        order.payment_status = 'paid'
-                        order.save()
-                        
-                        # Don't distribute to wallet yet - wait for restaurant confirmation
-                        logger.info(f'Payment completed for order #{order.id}, waiting for restaurant confirmation')
-                        
-                elif payment_status == 'failed':
-                    payment.status = 'failed'
+            # Update payment status based on webhook
+            if payment_status in ('completed', 'successful', 'success', 'paid'):
+                if payment.status != 'completed':
+                    payment.status = 'completed'
+                    payment.transaction_id = transaction_id or payment.transaction_id
                     payment.payment_details = data
+                    payment.paid_at = timezone.now()
                     payment.save()
-                    logger.warning(f'Payment failed: reference={reference}')
+                    logger.info(f'Payment {payment.reference} marked as completed')
                     
-                elif payment_status in ('pending', 'processing'):
-                    payment.status = 'processing'
-                    payment.payment_details = data
-                    payment.save()
+                    # Update order payment status
+                    order = payment.order
+                    order.payment_status = 'paid'
+                    order.save()
                     
-                else:
-                    logger.warning(f'Unknown webhook status: {payment_status}')
-
-            except Exception as e:
-                logger.error(f'Webhook processing error: {e}', exc_info=True)
+                    logger.info(f'Payment completed for order #{order.id}, waiting for restaurant confirmation')
+                    
+            elif payment_status == 'failed':
+                payment.status = 'failed'
+                payment.payment_details = data
+                payment.save()
+                logger.warning(f'Payment failed: reference={paychangu_reference}')
+                
+            elif payment_status in ('pending', 'processing'):
+                payment.status = 'processing'
+                payment.payment_details = data
+                payment.save()
+                
+            else:
+                logger.warning(f'Unknown webhook status: {payment_status}')
         else:
-            logger.warning('Webhook received with no reference')
+            logger.warning(f'Payment not found for PayChangu reference: {paychangu_reference}')
+            logger.info(f'Custom data: {custom_data}')
+            logger.info(f'Our reference from custom data: {our_reference}')
 
         return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
 
