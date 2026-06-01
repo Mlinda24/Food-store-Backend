@@ -401,9 +401,15 @@ class PaymentViewSet(viewsets.ViewSet):
             'first_name': getattr(request.user, 'first_name', '') or 'Customer',
             'last_name': getattr(request.user, 'last_name', '') or 'User',
             'reference': reference,
+            'tx_ref': reference,
             'callback_url': f'{settings.WEBHOOK_BASE_URL}/api/payments/webhook/',
             'return_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}',
             'cancel_url': f'{settings.WEBHOOK_BASE_URL}/payment/status/?reference={reference}&cancelled=true',
+            'custom_data': {
+                'order_id': order.id,
+                'reference': reference,
+                'user_id': request.user.id,
+            }
         }
 
         headers = {
@@ -426,18 +432,27 @@ class PaymentViewSet(viewsets.ViewSet):
             if response.status_code in (200, 201):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
-                payment.transaction_id = data.get('tx_ref') or data.get('transaction_id')
+                
+                paychangu_tx_ref = data.get('tx_ref') or data.get('reference')
+                payment.transaction_id = paychangu_tx_ref
                 payment.payment_details = response_data
                 payment.status = 'processing'
                 payment.save()
+                
                 checkout_url = (
-                    data.get('checkout_url') or data.get('link') or response_data.get('checkout_url')
+                    data.get('checkout_url') or 
+                    data.get('link') or 
+                    response_data.get('checkout_url')
                 )
+                
                 logger.info(f'Payment initiated. Checkout URL: {checkout_url}')
+                logger.info(f'PayChangu TX Ref: {paychangu_tx_ref}')
+                
                 return Response(
                     {
                         'payment_id': payment.id,
                         'reference': reference,
+                        'paychangu_reference': paychangu_tx_ref,
                         'checkout_url': checkout_url,
                         'amount': str(order.total_price),
                         'formatted_amount': f'MK{order.total_price:,.2f}',
@@ -698,12 +713,20 @@ class PaymentViewSet(viewsets.ViewSet):
 
         event_data = data.get('data', data)
         
+        # Try multiple possible reference fields
         reference = (
             event_data.get('reference') or 
             event_data.get('tx_ref') or 
+            event_data.get('order_id') or
+            event_data.get('transaction_id') or
             data.get('reference') or 
             data.get('tx_ref')
         )
+        
+        # Also try to extract from custom data
+        if not reference and 'custom_data' in event_data:
+            custom = event_data.get('custom_data', {})
+            reference = custom.get('reference')
         
         payment_status = event_data.get('status') or data.get('status')
         transaction_id = (
@@ -720,40 +743,67 @@ class PaymentViewSet(viewsets.ViewSet):
 
         if reference:
             try:
+                # Try to find by our reference (FOOD-XXX)
                 try:
                     payment = Payment.objects.select_related('order', 'order__customer').get(
                         reference=reference
                     )
                     logger.info(f'Found payment by reference: {payment.id}')
                 except Payment.DoesNotExist:
+                    # Try by transaction_id
                     try:
                         payment = Payment.objects.select_related('order', 'order__customer').get(
                             transaction_id=reference
                         )
                         logger.info(f'Found payment by transaction_id: {payment.id}')
                     except Payment.DoesNotExist:
-                        logger.warning(f'Payment not found for reference: {reference}')
-                        webhook_log.reference = f'{reference}_not_found'
-                        webhook_log.save()
-                        return Response({'status': 'ok', 'message': 'Reference not found'}, status=200)
+                        # Try partial match on reference
+                        try:
+                            payment = Payment.objects.select_related('order', 'order__customer').filter(
+                                reference__icontains=reference[-8:] if len(reference) >= 8 else reference
+                            ).first()
+                            if payment:
+                                logger.info(f'Found payment by partial match: {payment.id}')
+                        except:
+                            pass
+                        
+                        if not payment:
+                            logger.warning(f'Payment not found for reference: {reference}')
+                            webhook_log.reference = f'{reference}_not_found'
+                            webhook_log.save()
+                            return Response({'status': 'ok', 'message': 'Reference not found'}, status=200)
 
                 logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}')
 
-                if payment_status in ('completed', 'successful', 'success'):
-                    distributed = _distribute_to_wallet(payment, transaction_id, data)
-                    if not distributed:
-                        logger.info('Webhook: payment already distributed')
-                    else:
-                        logger.info('Webhook: payment distributed successfully')
+                # Update payment status based on webhook
+                if payment_status in ('completed', 'successful', 'success', 'paid'):
+                    if payment.status != 'completed':
+                        payment.status = 'completed'
+                        payment.transaction_id = transaction_id or payment.transaction_id
+                        payment.payment_details = data
+                        payment.paid_at = timezone.now()
+                        payment.save()
+                        logger.info(f'Payment {payment.reference} marked as completed')
+                        
+                        # Update order payment status
+                        order = payment.order
+                        order.payment_status = 'paid'
+                        order.save()
+                        
+                        # Don't distribute to wallet yet - wait for restaurant confirmation
+                        logger.info(f'Payment completed for order #{order.id}, waiting for restaurant confirmation')
+                        
                 elif payment_status == 'failed':
                     payment.status = 'failed'
                     payment.payment_details = data
                     payment.save()
                     logger.warning(f'Payment failed: reference={reference}')
+                    
                 elif payment_status in ('pending', 'processing'):
                     payment.status = 'processing'
                     payment.payment_details = data
                     payment.save()
+                    
                 else:
                     logger.warning(f'Unknown webhook status: {payment_status}')
 
