@@ -50,7 +50,10 @@ def _get_restaurant_for_order(order) -> Restaurant:
 
 
 def _distribute_to_wallet(payment, transaction_id=None, raw_data=None) -> bool:
-    """Marks payment as completed and updates order status"""
+    """
+    Marks payment as completed but does NOT credit wallet yet.
+    Wallet is only credited when restaurant confirms the order.
+    """
     if payment.distributed_to_wallets:
         logger.info(f'Payment {payment.reference} already distributed — skipping')
         return False
@@ -76,31 +79,29 @@ def _distribute_to_wallet(payment, transaction_id=None, raw_data=None) -> bool:
         payment.platform_fee = platform_fee
         payment.restaurant_amount = restaurant_amount
         payment.pending_restaurant_amount = restaurant_amount
-        payment.distributed_to_wallets = False
+        payment.distributed_to_wallets = False  # NOT distributed yet
         payment.distributed_at = None
         payment.save()
 
-        # Update order status - THIS IS CRITICAL
+        # Only update payment status, NOT order status
         order.payment_status = 'paid'
-        order.status = 'confirmed'  # Change order status to confirmed
         order.paid_at = getattr(order, 'paid_at', None) or timezone.now()
         order.save()
 
         logger.info(
             f'Payment completed: order #{order.id}, '
-            f'amount=MK{restaurant_amount:,.2f}, '
-            f'platform_fee=MK{platform_fee:,.2f}, '
-            f'order_status={order.status}'
+            f'amount=MK{restaurant_amount:,.2f} pending restaurant confirmation, '
+            f'platform_fee=MK{platform_fee:,.2f}'
         )
 
-    # Send notification to customer
+    # Notification to customer
     try:
         from notifications.services import NotificationService
         NotificationService.send_notification(
             user=order.customer,
             notification_type='payment',
             title='Payment Successful',
-            message=f'Your payment of MK{payment.amount:,.2f} for Order #{order.id} was successful. Your order is now confirmed.',
+            message=f'Your payment of MK{payment.amount:,.2f} for Order #{order.id} was successful. Waiting for restaurant confirmation.',
             data={
                 'id': str(order.id),
                 'transaction_id': str(transaction_id or ''),
@@ -432,6 +433,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 response_data = response.json()
                 data = response_data.get('data', response_data)
                 
+                # Store PayChangu's tx_ref as transaction_id for webhook matching
                 paychangu_tx_ref = data.get('tx_ref') or data.get('reference')
                 payment.transaction_id = paychangu_tx_ref
                 payment.payment_details = response_data
@@ -479,35 +481,6 @@ class PaymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    # ── CHECK STATUS (NEW) ────────────────────────────────────────────────────
-
-    @action(detail=False, methods=['get'])
-    def check_status(self, request):
-        """Check payment status by order_id"""
-        order_id = request.query_params.get('order_id')
-        
-        if not order_id:
-            return Response({'error': 'order_id required'}, status=400)
-        
-        try:
-            payment = Payment.objects.select_related('order').get(order_id=order_id)
-            
-            return Response({
-                'success': payment.status == 'completed',
-                'payment_status': payment.status,
-                'order_id': order_id,
-                'reference': payment.reference,
-                'amount': float(payment.amount),
-                'message': 'Payment successful!' if payment.status == 'completed' else 'Payment pending'
-            })
-        except Payment.DoesNotExist:
-            return Response({
-                'success': False,
-                'payment_status': 'not_found',
-                'order_id': order_id,
-                'message': 'No payment found for this order'
-            })
-
     # ── TEST CONFIRM PAYMENT ───────────────────────────────────────────────────
 
     @action(detail=False, methods=['post'])
@@ -533,6 +506,7 @@ class PaymentViewSet(viewsets.ViewSet):
         if payment.order.customer != request.user and not request.user.is_staff:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
+        # Check if already distributed
         if payment.distributed_to_wallets:
             return Response({
                 'status': 'already_completed',
@@ -540,6 +514,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 'order_id': payment.order.id,
             })
 
+        # Process the payment
         transaction_id = f'MANUAL_{uuid.uuid4().hex[:8]}'
         _distribute_to_wallet(payment, transaction_id)
         payment.refresh_from_db()
@@ -553,7 +528,7 @@ class PaymentViewSet(viewsets.ViewSet):
             'restaurant_amount': float(payment.restaurant_amount),
         })
 
-    # ── SYNC PAYMENT (FIXED) ──────────────────────────────────────────────────
+    # ── SYNC PAYMENT ──────────────────────────────────────────────────────────
 
     @action(detail=False, methods=['post'])
     def sync_payment(self, request):
@@ -571,38 +546,33 @@ class PaymentViewSet(viewsets.ViewSet):
         except Payment.DoesNotExist:
             return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
         
+        # If payment is already completed
         if payment.status == 'completed':
             wallet = _get_wallet_for_order(order)
             return Response({
                 'status': 'already_completed', 
                 'order_id': order_id,
-                'wallet_balance': float(wallet.balance),
-                'success': True
+                'wallet_balance': float(wallet.balance)
             })
         
+        # Call PayChangu to verify
         paychangu_ref = payment.transaction_id or payment.reference
         remote_status, transaction_id, raw_data = _verify_with_paychangu(paychangu_ref)
         
         if remote_status in ('completed', 'successful', 'success'):
             _distribute_to_wallet(payment, transaction_id, raw_data)
-            order.status = 'confirmed'
-            order.save()
-            payment.refresh_from_db()
             wallet = _get_wallet_for_order(order)
-            
             return Response({
                 'status': 'success',
                 'message': 'Payment synced successfully',
                 'order_id': order_id,
-                'wallet_balance': float(wallet.balance),
-                'success': True
+                'wallet_balance': float(wallet.balance)
             })
         
         return Response({
             'status': 'pending', 
             'message': 'Payment still pending',
-            'remote_status': remote_status,
-            'success': False
+            'remote_status': remote_status
         })
 
     # ── DEMO CONFIRM PAYMENT ───────────────────────────────────────────────────
@@ -633,6 +603,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 payment.paid_at = timezone.now()
                 payment.save()
             
+            # Distribute to wallet
             _distribute_to_wallet(payment, f'DEMO_{uuid.uuid4().hex[:8]}')
             payment.refresh_from_db()
             
@@ -691,6 +662,7 @@ class PaymentViewSet(viewsets.ViewSet):
                         }
                         transaction.save()
                         
+                        # Refund the wallet if transaction was already deducted
                         if transaction.wallet and transaction.status == 'processing':
                             transaction.wallet.balance += transaction.amount
                             transaction.wallet.save()
@@ -742,13 +714,18 @@ class PaymentViewSet(viewsets.ViewSet):
 
         event_data = data.get('data', data)
         
+        # Get PayChangu's reference
         paychangu_reference = event_data.get('reference') or event_data.get('tx_ref')
+        
+        # Also try to get custom data
         custom_data = event_data.get('custom_data', {})
         our_reference = custom_data.get('reference')
         
+        # Try to find payment by PayChangu reference or our reference
         payment = None
         
         if paychangu_reference:
+            # Try to find payment by transaction_id (PayChangu's reference)
             try:
                 payment = Payment.objects.select_related('order', 'order__customer').get(
                     transaction_id=paychangu_reference
@@ -758,6 +735,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 pass
         
         if not payment and our_reference:
+            # Try to find by our reference
             try:
                 payment = Payment.objects.select_related('order', 'order__customer').get(
                     reference=our_reference
@@ -767,6 +745,7 @@ class PaymentViewSet(viewsets.ViewSet):
                 pass
         
         if not payment and paychangu_reference:
+            # Try partial match on reference
             try:
                 payment = Payment.objects.select_related('order', 'order__customer').filter(
                     reference__icontains=paychangu_reference[-8:] if len(paychangu_reference) >= 8 else paychangu_reference
@@ -788,6 +767,7 @@ class PaymentViewSet(viewsets.ViewSet):
         if payment:
             logger.info(f'Found payment: ID={payment.id}, Order={payment.order.id}, Current Status={payment.status}')
 
+            # Update payment status based on webhook
             if payment_status in ('completed', 'successful', 'success', 'paid'):
                 if payment.status != 'completed':
                     payment.status = 'completed'
@@ -797,12 +777,12 @@ class PaymentViewSet(viewsets.ViewSet):
                     payment.save()
                     logger.info(f'Payment {payment.reference} marked as completed')
                     
+                    # Update order payment status
                     order = payment.order
                     order.payment_status = 'paid'
-                    order.status = 'confirmed'
                     order.save()
                     
-                    logger.info(f'Payment completed for order #{order.id}, order status: {order.status}')
+                    logger.info(f'Payment completed for order #{order.id}, waiting for restaurant confirmation')
                     
             elif payment_status == 'failed':
                 payment.status = 'failed'
@@ -819,10 +799,12 @@ class PaymentViewSet(viewsets.ViewSet):
                 logger.warning(f'Unknown webhook status: {payment_status}')
         else:
             logger.warning(f'Payment not found for PayChangu reference: {paychangu_reference}')
+            logger.info(f'Custom data: {custom_data}')
+            logger.info(f'Our reference from custom data: {our_reference}')
 
         return Response({'status': 'ok', 'message': 'Webhook received'}, status=status.HTTP_200_OK)
 
-    # ── STATUS BY REFERENCE (FIXED) ───────────────────────────────────────────
+    # ── STATUS BY REFERENCE ───────────────────────────────────────────────────
 
     @action(detail=False, methods=['get'])
     def status_by_reference(self, request):
@@ -843,9 +825,6 @@ class PaymentViewSet(viewsets.ViewSet):
         if payment.order.customer != request.user and not request.user.is_staff:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
-        is_paid = False
-        order_status = payment.order.status
-        
         if payment.status in ('processing', 'pending') and not payment.distributed_to_wallets:
             paychangu_ref = payment.transaction_id
             if paychangu_ref:
@@ -855,12 +834,6 @@ class PaymentViewSet(viewsets.ViewSet):
                     logger.info('PayChangu confirms completed — marking payment as completed')
                     _distribute_to_wallet(payment, transaction_id, raw_data)
                     payment.refresh_from_db()
-                    is_paid = True
-                    order_status = 'confirmed'
-        else:
-            is_paid = payment.status == 'completed'
-            if is_paid:
-                order_status = 'confirmed'
 
         return Response({
             'reference': payment.reference,
@@ -871,11 +844,9 @@ class PaymentViewSet(viewsets.ViewSet):
             'method': payment.method,
             'method_display': payment.get_method_display(),
             'order_id': payment.order.id,
-            'order_status': order_status,
+            'order_status': payment.order.status,
             'payment_status': payment.order.payment_status,
             'distributed_to_wallets': payment.distributed_to_wallets,
-            'success': is_paid,
-            'message': 'Payment successful!' if is_paid else 'Payment pending'
         })
 
     # ── MY PAYMENTS ───────────────────────────────────────────────────────────
