@@ -7,6 +7,7 @@ import cloudinary.uploader
 import cloudinary.api
 import dj_database_url
 
+# Load environment variables
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,10 +22,10 @@ ALLOWED_HOSTS = [
     h.strip()
     for h in os.environ.get(
         'ALLOWED_HOSTS',
-        '.onrender.com,localhost,127.0.0.1,192.168.137.1'
+        'localhost,127.0.0.1,192.168.137.1,192.168.1.100,10.0.2.2,.ngrok.io'
     ).split(',')
     if h.strip()
-]
+] + ['*']  # Add wildcard for development
 
 # ─── Apps ────────────────────────────────────────────────────────────────────
 
@@ -69,18 +70,8 @@ MIDDLEWARE = [
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 
-# Allow all origins in production (for Flutter web/app)
-CORS_ALLOW_ALL_ORIGINS = True  # Set to True temporarily for testing
-
-# If you want to specify specific origins, use this instead:
-# CORS_ALLOWED_ORIGINS = [
-#     "https://food-store-backend-4eo6.onrender.com",
-#     "http://localhost:8080",
-#     "http://127.0.0.1:8080",
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-# ]
-
+# Allow all origins for development
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT']
 CORS_ALLOW_HEADERS = [
@@ -89,14 +80,15 @@ CORS_ALLOW_HEADERS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    'https://*.onrender.com',
-    'https://*.ngrok.io',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
     'http://192.168.137.1:8000',
+    'http://10.0.2.2:8000',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080',
 ]
 
-# ─── Security (production only) ──────────────────────────────────────────────
+# ─── Security (development friendly) ─────────────────────────────────────────
 
 if not DEBUG:
     SECURE_SSL_REDIRECT = True
@@ -116,8 +108,8 @@ else:
 
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'None'  # Changed to 'None' for cross-origin requests
-CSRF_COOKIE_SAMESITE = 'None'      # Changed to 'None' for cross-origin requests
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
 
 # ─── URLs / WSGI ─────────────────────────────────────────────────────────────
 
@@ -142,15 +134,26 @@ TEMPLATES = [
     },
 ]
 
-# ─── Database ────────────────────────────────────────────────────────────────
+# ─── Database - Using SQLite (for development) ───────────────────────────────
 
+# Use SQLite for development (comment out PostgreSQL for now)
 DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL'),
-        conn_max_age=600,
-        ssl_require=not DEBUG,
-    )
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 }
+
+# Optional: Keep PostgreSQL commented for when you need it
+# database_url = os.environ.get('DATABASE_URL')
+# if database_url:
+#     DATABASES = {
+#         'default': dj_database_url.config(
+#             default=database_url,
+#             conn_max_age=600,
+#             ssl_require=True,
+#         )
+#     }
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -169,10 +172,11 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
+        'rest_framework.permissions.AllowAny',  # Changed for development
     ),
     'DEFAULT_RENDERER_CLASSES': (
         'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',  # Added for testing
     ),
     'DEFAULT_PARSER_CLASSES': (
         'rest_framework.parsers.JSONParser',
@@ -206,8 +210,8 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # ─── Cloudinary (media storage) ──────────────────────────────────────────────
 
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', 'dvtfdu0yq')
-CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '997758335612991')
-CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', 'vM7te6Bd-wO_78r_r9qP4cM0q-0')
+CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '997758335625531')
+CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', 'Mlf9ODhvLsAuqAMRhTkxRyNmnsU')
 
 cloudinary.config(
     cloud_name=CLOUDINARY_CLOUD_NAME,
@@ -243,7 +247,7 @@ MEDIA_ROOT.mkdir(exist_ok=True)
 PAYCHANGU_PUBLIC_KEY = os.environ.get('PAYCHANGU_PUBLIC_KEY', '')
 PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY', '')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
-WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
+WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'http://localhost:8000')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 
 # ─── Email ───────────────────────────────────────────────────────────────────
@@ -255,7 +259,7 @@ EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'Bsc-21-22@unima.ac.mw')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'cxwjbnbhaoipfctz')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Bsc-21-22@unima.ac.mw')
-SITE_URL = os.environ.get('SITE_URL', 'https://food-store-backend-4eo6.onrender.com')
+SITE_URL = os.environ.get('SITE_URL', 'http://localhost:8000')
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -276,14 +280,15 @@ LOGGING = {
     },
     'root': {
         'handlers': ['console'],
-        'level': 'INFO',
+        'level': 'DEBUG',  # Changed to DEBUG for development
     },
     'loggers': {
         'django': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
-        'django.request': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'django.request': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
         'payments': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
-        'accounts': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        'accounts': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
         'cloudinary': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
+        'drivers': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
     },
 }
 

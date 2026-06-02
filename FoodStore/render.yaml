@@ -36,3 +36,8 @@ databases:
     databaseName: food_store_db
     user: food_store_user
     plan: free
+
+services:
+  - type: web
+    name: food-store-backend
+    postDeployCommand: python manage.py create_driver_profiles

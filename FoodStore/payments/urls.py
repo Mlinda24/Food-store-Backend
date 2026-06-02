@@ -20,4 +20,5 @@ urlpatterns = [
     path('payments/initiate_simple/', PaymentViewSet.as_view({'post': 'initiate_simple'}), name='initiate-simple-payment'),
     path('payments/verify/', PaymentViewSet.as_view({'post': 'verify'}), name='verify-payment'),
     path('payments/my_payments/', PaymentViewSet.as_view({'get': 'my_payments'}), name='my-payments'),
+    path('check-status/', PaymentViewSet.as_view({'get': 'check_status'}), name='check-status'),
 ]
