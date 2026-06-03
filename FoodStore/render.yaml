@@ -41,3 +41,8 @@ services:
   - type: web
     name: food-store-backend
     postDeployCommand: python manage.py create_driver_profiles
+
+preDeployCommand: |
+  python manage.py migrate
+  python backup_data.py
+  python manage.py create_test_users_if_empty
