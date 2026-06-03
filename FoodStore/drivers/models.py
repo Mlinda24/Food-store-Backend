@@ -1,6 +1,5 @@
 from django.db import models
 from django.conf import settings
-from django.core.validators import MinValueValidator, MaxValueValidator
 from decimal import Decimal
 
 class DriverProfile(models.Model):
@@ -26,18 +25,18 @@ class DriverProfile(models.Model):
     )
     
     # Personal Information
-    phone_number = models.CharField(max_length=20)
-    alternative_phone = models.CharField(max_length=20, blank=True)
+    phone_number = models.CharField(max_length=20, blank=True, default='')
+    alternative_phone = models.CharField(max_length=20, blank=True, default='')
     
     # Vehicle Information
     vehicle_type = models.CharField(max_length=20, choices=VEHICLE_CHOICES, default='motorcycle')
-    vehicle_registration = models.CharField(max_length=50)
-    vehicle_model = models.CharField(max_length=100, blank=True)
-    vehicle_color = models.CharField(max_length=50, blank=True)
+    vehicle_registration = models.CharField(max_length=50, blank=True, default='')
+    vehicle_model = models.CharField(max_length=100, blank=True, default='')
+    vehicle_color = models.CharField(max_length=50, blank=True, default='')
     
     # License Information
-    license_number = models.CharField(max_length=50)
-    license_expiry_date = models.DateField()
+    license_number = models.CharField(max_length=50, blank=True, default='')
+    license_expiry_date = models.DateField(null=True, blank=True)
     
     # Verification
     is_verified = models.BooleanField(default=False)

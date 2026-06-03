@@ -30,8 +30,10 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source='order.customer.username', read_only=True)
     customer_phone = serializers.CharField(source='order.customer.phone', read_only=True)
     delivery_address = serializers.CharField(source='order.delivery_address', read_only=True)
-    restaurant_name = serializers.CharField(source='order.restaurant.name', read_only=True)
-    restaurant_address = serializers.CharField(source='order.restaurant.address', read_only=True)
+    
+    # Handle restaurant_name safely - if no ForeignKey, use restaurant_id
+    restaurant_name = serializers.SerializerMethodField()
+    restaurant_address = serializers.SerializerMethodField()
     total_amount = serializers.DecimalField(source='order.total_price', read_only=True, max_digits=10, decimal_places=2)
     
     class Meta:
@@ -43,21 +45,61 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
             'accepted_at', 'picked_up_at', 'delivered_at', 'created_at'
         ]
         read_only_fields = ['created_at']
+    
+    def get_restaurant_name(self, obj):
+        try:
+            if hasattr(obj.order, 'restaurant') and obj.order.restaurant:
+                return obj.order.restaurant.name
+        except:
+            pass
+        return f"Restaurant #{obj.order.restaurant_id}" if obj.order.restaurant_id else "Restaurant"
+    
+    def get_restaurant_address(self, obj):
+        try:
+            if hasattr(obj.order, 'restaurant') and obj.order.restaurant:
+                return obj.order.restaurant.address
+        except:
+            pass
+        return "Address not available"
 
 
 class AvailableOrderSerializer(serializers.ModelSerializer):
-    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
-    restaurant_address = serializers.CharField(source='restaurant.address', read_only=True)
+    restaurant_name = serializers.SerializerMethodField()
+    restaurant_address = serializers.SerializerMethodField()
     delivery_fee = serializers.DecimalField(max_digits=10, decimal_places=2, default=2000.00)
     formatted_total = serializers.SerializerMethodField()
+    customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
     
     class Meta:
         model = Order
         fields = [
             'id', 'restaurant', 'restaurant_name', 'restaurant_address', 
             'delivery_address', 'total_price', 'formatted_total', 'delivery_fee', 
-            'created', 'special_instructions'
+            'created', 'special_instructions', 'customer_name', 'customer_phone'
         ]
+    
+    def get_restaurant_name(self, obj):
+        try:
+            if hasattr(obj, 'restaurant') and obj.restaurant:
+                return obj.restaurant.name
+        except:
+            pass
+        return f"Restaurant #{obj.restaurant_id}" if hasattr(obj, 'restaurant_id') and obj.restaurant_id else "Restaurant"
+    
+    def get_restaurant_address(self, obj):
+        try:
+            if hasattr(obj, 'restaurant') and obj.restaurant:
+                return obj.restaurant.address
+        except:
+            pass
+        return "Address not available"
     
     def get_formatted_total(self, obj):
         return f"MK{obj.total_price:,.2f}"
+    
+    def get_customer_name(self, obj):
+        return obj.customer.username if obj.customer else "Customer"
+    
+    def get_customer_phone(self, obj):
+        return obj.customer.phone if obj.customer and hasattr(obj.customer, 'phone') else ""

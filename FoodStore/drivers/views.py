@@ -10,8 +10,7 @@ from datetime import timedelta
 from .models import DriverProfile, DeliveryAssignment
 from .serializers import (
     DriverProfileSerializer, 
-    DeliveryAssignmentSerializer, 
-    AvailableOrderSerializer
+    DeliveryAssignmentSerializer
 )
 from orders.models import Order
 import logging
@@ -20,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class DriverViewSet(viewsets.GenericViewSet):
+    """Driver profile and earnings management"""
     permission_classes = [IsAuthenticated]
     serializer_class = DriverProfileSerializer
     
@@ -39,18 +39,13 @@ class DriverViewSet(viewsets.GenericViewSet):
         driver, _ = DriverProfile.objects.get_or_create(user=request.user)
         
         # Update fields
-        if 'phone_number' in request.data:
-            driver.phone_number = request.data['phone_number']
-        if 'vehicle_type' in request.data:
-            driver.vehicle_type = request.data['vehicle_type']
-        if 'vehicle_registration' in request.data:
-            driver.vehicle_registration = request.data['vehicle_registration']
-        if 'vehicle_model' in request.data:
-            driver.vehicle_model = request.data['vehicle_model']
-        if 'vehicle_color' in request.data:
-            driver.vehicle_color = request.data['vehicle_color']
-        if 'license_number' in request.data:
-            driver.license_number = request.data['license_number']
+        updatable_fields = ['phone_number', 'vehicle_type', 'vehicle_registration', 
+                           'vehicle_model', 'vehicle_color', 'license_number', 
+                           'license_expiry_date', 'alternative_phone']
+        
+        for field in updatable_fields:
+            if field in request.data:
+                setattr(driver, field, request.data[field])
         
         driver.save()
         serializer = DriverProfileSerializer(driver)
@@ -158,6 +153,7 @@ class DriverViewSet(viewsets.GenericViewSet):
 
 
 class DeliveryOrderViewSet(viewsets.GenericViewSet):
+    """Delivery order management for drivers"""
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['get'])
@@ -170,24 +166,37 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             delivery_assignment__isnull=True
         ).exclude(
             delivery_assignment__status__in=['accepted', 'picked_up', 'delivered']
-        ).select_related('restaurant').order_by('-created')
+        ).order_by('-created')
         
         # Format response for driver app
         available_orders = []
         for order in orders:
+            # Get restaurant name
+            restaurant_name = "Restaurant"
+            try:
+                if hasattr(order, 'restaurant') and order.restaurant:
+                    restaurant_name = order.restaurant.name
+                elif hasattr(order, 'restaurant_id') and order.restaurant_id:
+                    from restaurants.models import Restaurant
+                    restaurant = Restaurant.objects.filter(id=order.restaurant_id).first()
+                    if restaurant:
+                        restaurant_name = restaurant.name
+            except:
+                pass
+            
             available_orders.append({
                 'id': order.id,
-                'restaurant_name': order.restaurant.name if order.restaurant else 'Restaurant',
-                'restaurant_address': order.restaurant.address if order.restaurant else '',
-                'customer_name': order.customer.username,
-                'customer_phone': order.customer.phone if order.customer.phone else '',
+                'restaurant_name': restaurant_name,
+                'restaurant_address': getattr(order, 'delivery_address', ''),
+                'customer_name': order.customer.username if order.customer else 'Customer',
+                'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
                 'delivery_address': order.delivery_address,
                 'delivery_fee': float(getattr(order, 'delivery_fee', 2000.00)),
-                'distance': '2.5 km',  # Calculate based on location
+                'distance': '2.5 km',
                 'estimated_time': '25-35 min',
-                'items_summary': f"{order.items.count()} items",
+                'items_summary': f"{order.items.count()} items" if hasattr(order, 'items') else "Items",
                 'status': 'available',
-                'created': order.created.isoformat(),
+                'created': order.created.isoformat() if hasattr(order, 'created') else timezone.now().isoformat(),
             })
         
         return Response(available_orders)
@@ -198,10 +207,27 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         driver, _ = DriverProfile.objects.get_or_create(user=request.user)
         deliveries = DeliveryAssignment.objects.filter(
             driver=driver
-        ).select_related('order', 'order__restaurant', 'order__customer').order_by('-created_at')
+        ).select_related('order').order_by('-created_at')
         
-        serializer = DeliveryAssignmentSerializer(deliveries, many=True)
-        return Response(serializer.data)
+        result = []
+        for delivery in deliveries:
+            order = delivery.order
+            result.append({
+                'id': delivery.id,
+                'order_id': order.id,
+                'restaurant_name': getattr(order, 'restaurant_name', 'Restaurant'),
+                'customer_name': order.customer.username if order.customer else 'Customer',
+                'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
+                'delivery_address': order.delivery_address,
+                'status': delivery.status,
+                'delivery_fee': float(delivery.delivery_fee),
+                'accepted_at': delivery.accepted_at,
+                'picked_up_at': delivery.picked_up_at,
+                'delivered_at': delivery.delivered_at,
+                'created_at': delivery.created_at,
+            })
+        
+        return Response(result)
     
     @action(detail=False, methods=['get'])
     def active(self, request):
@@ -212,8 +238,19 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 driver=driver,
                 status__in=['accepted', 'picked_up']
             )
-            serializer = DeliveryAssignmentSerializer(active_delivery)
-            return Response(serializer.data)
+            order = active_delivery.order
+            return Response({
+                'id': active_delivery.id,
+                'order_id': order.id,
+                'restaurant_name': getattr(order, 'restaurant_name', 'Restaurant'),
+                'customer_name': order.customer.username if order.customer else 'Customer',
+                'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
+                'delivery_address': order.delivery_address,
+                'status': active_delivery.status,
+                'delivery_fee': float(active_delivery.delivery_fee),
+                'accepted_at': active_delivery.accepted_at,
+                'picked_up_at': active_delivery.picked_up_at,
+            })
         except DeliveryAssignment.DoesNotExist:
             return Response({})
     
@@ -269,8 +306,13 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             driver.is_available = False
             driver.save()
         
-        serializer = DeliveryAssignmentSerializer(delivery)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response({
+            'success': True,
+            'id': delivery.id,
+            'order_id': order.id,
+            'status': delivery.status,
+            'message': 'Order accepted successfully'
+        }, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['post'])
     def decline(self, request, pk=None):
@@ -280,23 +322,13 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        driver, _ = DriverProfile.objects.get_or_create(user=request.user)
-        
-        # Create a declined record (optional, for history)
-        delivery = DeliveryAssignment.objects.create(
-            order=order,
-            driver=driver,
-            status='cancelled',
-            delivery_fee=getattr(order, 'delivery_fee', 2000.00)
-        )
-        
-        return Response({'status': 'success', 'message': 'Order declined'})
+        return Response({'success': True, 'message': 'Order declined'})
     
     @action(detail=True, methods=['patch'])
     def status(self, request, pk=None):
         """Update delivery status (picked_up, delivered)"""
         try:
-            delivery = DeliveryAssignment.objects.select_related('driver', 'order', 'order__customer').get(id=pk)
+            delivery = DeliveryAssignment.objects.select_related('driver', 'order').get(id=pk)
         except DeliveryAssignment.DoesNotExist:
             return Response({'error': 'Delivery not found'}, status=status.HTTP_404_NOT_FOUND)
         
@@ -316,41 +348,44 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        if new_status == 'picked_up':
-            delivery.status = 'picked_up'
-            delivery.picked_up_at = timezone.now()
-            delivery.save()
-            
-        elif new_status == 'delivered':
-            delivery.status = 'delivered'
-            delivery.delivered_at = timezone.now()
-            delivery.save()
-            
-            # Update order status
-            order = delivery.order
-            order.status = 'delivered'
-            order.save()
-            
-            # Update driver earnings
-            driver = delivery.driver
-            driver.total_deliveries += 1
-            driver.total_earnings += delivery.delivery_fee
-            driver.current_balance += delivery.delivery_fee
-            driver.status = 'online'
-            driver.is_available = True
-            driver.save()
-            
-            logger.info(f'Driver {driver.user.username} earned MK{delivery.delivery_fee} for delivery #{delivery.id}')
-            
-        elif new_status == 'cancelled':
-            delivery.status = 'cancelled'
-            delivery.save()
-            
-            # Set driver back to online
-            driver = delivery.driver
-            driver.status = 'online'
-            driver.is_available = True
-            driver.save()
+        with transaction.atomic():
+            if new_status == 'picked_up':
+                delivery.status = 'picked_up'
+                delivery.picked_up_at = timezone.now()
+                delivery.save()
+                
+            elif new_status == 'delivered':
+                delivery.status = 'delivered'
+                delivery.delivered_at = timezone.now()
+                delivery.save()
+                
+                # Update order status
+                order = delivery.order
+                order.status = 'delivered'
+                order.save()
+                
+                # Update driver earnings
+                driver.total_deliveries += 1
+                driver.total_earnings += delivery.delivery_fee
+                driver.current_balance += delivery.delivery_fee
+                driver.status = 'online'
+                driver.is_available = True
+                driver.save()
+                
+                logger.info(f'Driver {driver.user.username} earned MK{delivery.delivery_fee} for delivery #{delivery.id}')
+                
+            elif new_status == 'cancelled':
+                delivery.status = 'cancelled'
+                delivery.save()
+                
+                # Set driver back to online
+                driver.status = 'online'
+                driver.is_available = True
+                driver.save()
         
-        serializer = DeliveryAssignmentSerializer(delivery)
-        return Response(serializer.data)
+        return Response({
+            'success': True,
+            'id': delivery.id,
+            'status': delivery.status,
+            'message': f'Delivery status updated to {new_status}'
+        })
