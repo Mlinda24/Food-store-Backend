@@ -94,3 +94,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.AllowAny',
     ),
 }
+
+# Chapa Payment Settings
+CHAPA_SECRET_KEY = os.environ.get('CHAPA_SECRET_KEY', 'OPT1zz5a0QJ2Z8VgZDoEOnHxCLhddsBqUAW1uAxEPjN5tpoZp6o_YF9fFBouAP1F7Z0')
+WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
