@@ -108,8 +108,8 @@ CLOUDINARY_STORAGE = {
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
 # PayChangu Payment Settings
-PAYCHANGU_PUBLIC_KEY = os.environ.get('PAYCHANGU_PUBLIC_KEY')
-PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY')
+PAYCHANGU_PUBLIC_KEY = os.environ.get('pub-live-nQVBz1lqviEBzeUwpnfLmNXwXPPtcFWI')
+PAYCHANGU_SECRET_KEY = os.environ.get('sec-live-WurRorxIoLUDYOq4lin27lo3whqa62jD')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
-PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET')
+PAYCHANGU_WEBHOOK_SECRET = os.environ.get('Tambudzai1939')
 WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
