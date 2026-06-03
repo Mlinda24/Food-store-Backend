@@ -70,7 +70,6 @@ MIDDLEWARE = [
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 
-# Allow all origins for development
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT']
@@ -134,26 +133,14 @@ TEMPLATES = [
     },
 ]
 
-# ─── Database - Using SQLite (for development) ───────────────────────────────
+# ─── Database ────────────────────────────────────────────────────────────────
 
-# Use SQLite for development (comment out PostgreSQL for now)
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
-
-# Optional: Keep PostgreSQL commented for when you need it
-# database_url = os.environ.get('DATABASE_URL')
-# if database_url:
-#     DATABASES = {
-#         'default': dj_database_url.config(
-#             default=database_url,
-#             conn_max_age=600,
-#             ssl_require=True,
-#         )
-#     }
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -172,11 +159,11 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.AllowAny',  # Changed for development
+        'rest_framework.permissions.AllowAny',
     ),
     'DEFAULT_RENDERER_CLASSES': (
         'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',  # Added for testing
+        'rest_framework.renderers.BrowsableAPIRenderer',
     ),
     'DEFAULT_PARSER_CLASSES': (
         'rest_framework.parsers.JSONParser',
@@ -250,6 +237,10 @@ PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu
 WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'http://localhost:8000')
 PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 
+# Flutter web app URL — Paychangu will redirect users back here after payment
+# Change this to your deployed Flutter web URL in production
+FLUTTER_WEB_URL = os.environ.get('FLUTTER_WEB_URL', 'http://localhost:55723')
+
 # ─── Email ───────────────────────────────────────────────────────────────────
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
@@ -280,7 +271,7 @@ LOGGING = {
     },
     'root': {
         'handlers': ['console'],
-        'level': 'DEBUG',  # Changed to DEBUG for development
+        'level': 'DEBUG',
     },
     'loggers': {
         'django': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
