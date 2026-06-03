@@ -49,3 +49,14 @@ services:
       python manage.py migrate
       python backup_data.py
       python manage.py ensure_test_users
+
+services:
+  - type: web
+    name: food-store-backend
+    runtime: python
+    buildCommand: |
+      pip install -r requirements.txt
+      python manage.py collectstatic --noinput
+    startCommand: |
+      python manage.py migrate --noinput
+      gunicorn FoodStore.wsgi:application
