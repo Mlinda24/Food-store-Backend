@@ -202,7 +202,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             'total_price': total_price,
             'delivery_address': delivery_address,
             'note': request.data.get('note', ''),
-            'status': 'pending',       # ✅ Always starts pending
+            'status': 'pending',
             'payment_status': 'unpaid',
         }
 
@@ -259,9 +259,6 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         old_status = order.status
 
-        # ─── FIX: Block confirming a cancelled order ───────────────────────────
-        # Once an order is cancelled, it cannot be moved to any active status.
-        # This prevents wallet being credited after a decline/cancel.
         if old_status == 'cancelled' and new_status != 'cancelled':
             return Response(
                 {
@@ -271,35 +268,31 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ─── Guard: only allow paid orders to progress past pending ───────────
         paid_statuses = {'confirmed', 'preparing', 'ready', 'picked_up', 'delivered'}
-        if new_status in paid_statuses:
-            if order.payment_status != 'paid':
-                return Response(
-                    {
-                        'error': f"Cannot set status to '{new_status}' — order has not been paid yet.",
-                        'payment_status': order.payment_status,
-                        'current_status': order.status,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        if new_status in paid_statuses and order.payment_status != 'paid':
+            return Response(
+                {
+                    'error': f"Cannot set status to '{new_status}' — order has not been paid yet.",
+                    'payment_status': order.payment_status,
+                    'current_status': order.status,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Update the status
         order.status = new_status
         order.save()
 
         logger.info(f'Order #{order.id} status updated: {old_status} → {new_status}')
 
-        # ─── Credit wallet ONLY on confirmed, and ONLY once ───────────────────
-        # Wallet is never credited for cancelled/declined orders.
-        # The distributed_to_wallets flag on Payment prevents double-crediting.
+        # Credit wallet ONLY when restaurant confirms — never on decline
         if new_status == 'confirmed' and old_status != 'confirmed':
-            logger.info(f'Order #{order.id} confirmed by restaurant — crediting wallet')
-            success = self._credit_wallet_on_confirmation(order)
-            if not success:
-                logger.warning(f'Wallet credit failed for order #{order.id} — check payment status')
+            logger.info(f'Order #{order.id} confirmed — crediting wallet')
+            try:
+                from payments.views import _credit_wallet_on_order_confirmation
+                _credit_wallet_on_order_confirmation(order)
+            except Exception as e:
+                logger.error(f'Wallet credit failed for order #{order.id}: {e}')
 
-        # ─── Notify customer of status change ─────────────────────────────────
         try:
             from notifications.services import NotificationService
             NotificationService.send_notification(
@@ -322,25 +315,14 @@ class OrderViewSet(viewsets.ModelViewSet):
             'order': serializer.data
         }, status=status.HTTP_200_OK)
 
-   # In OrderViewSet.update_status(), replace the wallet credit block:
-
-if new_status == 'confirmed' and old_status != 'confirmed':
-    logger.info(f'Order #{order.id} confirmed — crediting wallet')
-    try:
-        from payments.views import _credit_wallet_on_order_confirmation
-        _credit_wallet_on_order_confirmation(order)
-    except Exception as e:
-        logger.error(f'Wallet credit failed for order #{order.id}: {e}')
     @action(detail=False, methods=['get'])
     def my_orders(self, request):
-        """Get orders for the current user (customer)"""
         orders = Order.objects.filter(customer=request.user).order_by('-created')
         serializer = self.get_serializer(orders, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def restaurant_orders(self, request):
-        """Get orders for the restaurant owner"""
         if not RESTAURANTS_AVAILABLE:
             return Response(
                 {'error': 'Restaurants module not available'},
@@ -366,7 +348,6 @@ if new_status == 'confirmed' and old_status != 'confirmed':
 
     @action(detail=False, methods=['get'])
     def pending_orders(self, request):
-        """Get pending orders for restaurant owner"""
         if not RESTAURANTS_AVAILABLE:
             return Response(
                 {'error': 'Restaurants module not available'},
