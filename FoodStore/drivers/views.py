@@ -131,6 +131,7 @@ class DriverViewSet(viewsets.GenericViewSet):
 class DeliveryOrderViewSet(viewsets.GenericViewSet):
     """Delivery order management for drivers"""
     permission_classes = [IsAuthenticated]
+    queryset = Order.objects.all()  
     
     @action(detail=False, methods=['get'])
     def available(self, request):
