@@ -7,16 +7,11 @@ router = DefaultRouter()
 router.register(r'orders', views.OrderViewSet, basename='order')
 router.register(r'cart', views.CartViewSet, basename='cart')
 
+    
 urlpatterns = [
     path('', include(router.urls)),
-
-    # My orders (customer)
     path('my_orders/', views.OrderViewSet.as_view({'get': 'my_orders'}), name='my-orders'),
-
-    # Explicit order status update
     path('orders/<pk>/update_status/', views.OrderViewSet.as_view({'patch': 'update_status'}), name='update-order-status'),
-
-    # Cart endpoints
     path('cart/add_item/', views.CartViewSet.as_view({'post': 'add_item'}), name='add-to-cart'),
     path('cart/update_item/', views.CartViewSet.as_view({'patch': 'update_item'}), name='update-cart-item'),
     path('cart/remove_item/', views.CartViewSet.as_view({'delete': 'remove_item'}), name='remove-from-cart'),
