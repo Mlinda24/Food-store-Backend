@@ -138,7 +138,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         # ✅ FIXED: Only show orders that are 'ready' and have no driver assigned
         orders = Order.objects.filter(
             status='ready',  # ← Only 'ready' orders
-            payment_status='paid',
         ).filter(
             Q(delivery_assignment__isnull=True) |
             Q(delivery_assignment__status='cancelled')
