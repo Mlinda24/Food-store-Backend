@@ -113,6 +113,117 @@ def _mark_payment_completed(payment, transaction_id=None, raw_data=None) -> bool
 
     return True
 
+@action(detail=False, methods=['post'], permission_classes=[AllowAny])
+@method_decorator(csrf_exempt)
+def webhook(self, request):
+    logger.info('=== WEBHOOK RECEIVED FROM PAYCHANGU ===')
+    raw_body = request.body
+
+    try:
+        data = json.loads(raw_body.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        data = request.data
+
+    logger.info(f'Webhook payload: {json.dumps(data, indent=2)}')
+
+    # Log immediately so we never lose a webhook even if processing fails
+    event_data = data.get('data', data)
+    paychangu_reference = (
+        event_data.get('tx_ref') or
+        event_data.get('reference') or
+        data.get('tx_ref') or
+        data.get('reference')
+    )
+    custom_data = event_data.get('custom_data', {}) or {}
+    our_reference = custom_data.get('reference')
+    payment_status = (
+        event_data.get('status') or
+        data.get('status') or ''
+    ).lower()
+    transaction_id = (
+        event_data.get('transaction_id') or
+        data.get('transaction_id') or
+        paychangu_reference
+    )
+
+    WebhookLog.objects.create(
+        reference=paychangu_reference or our_reference or 'unknown',
+        payload=data,
+    )
+
+    logger.info(f'paychangu_reference={paychangu_reference}')
+    logger.info(f'our_reference={our_reference}')
+    logger.info(f'payment_status={payment_status}')
+    logger.info(f'transaction_id={transaction_id}')
+
+    # ── Find payment (try every possible field) ────────────────────────────
+    payment = None
+
+    # 1. Match by stored transaction_id
+    if paychangu_reference and not payment:
+        payment = Payment.objects.filter(
+            transaction_id=paychangu_reference
+        ).select_related('order', 'order__customer').first()
+        if payment:
+            logger.info(f'Found by transaction_id: #{payment.id}')
+
+    # 2. Match by our reference stored in custom_data
+    if our_reference and not payment:
+        payment = Payment.objects.filter(
+            reference=our_reference
+        ).select_related('order', 'order__customer').first()
+        if payment:
+            logger.info(f'Found by our_reference: #{payment.id}')
+
+    # 3. Match by paychangu_reference directly as our reference
+    if paychangu_reference and not payment:
+        payment = Payment.objects.filter(
+            reference=paychangu_reference
+        ).select_related('order', 'order__customer').first()
+        if payment:
+            logger.info(f'Found by reference=paychangu_reference: #{payment.id}')
+
+    # 4. Partial suffix match (last resort)
+    if paychangu_reference and not payment and len(paychangu_reference) >= 8:
+        suffix = paychangu_reference[-8:]
+        payment = Payment.objects.filter(
+            reference__endswith=suffix
+        ).select_related('order', 'order__customer').first()
+        if payment:
+            logger.info(f'Found by suffix match: #{payment.id}')
+
+    if not payment:
+        logger.error(
+            f'❌ Payment NOT FOUND. '
+            f'paychangu_ref={paychangu_reference}, our_ref={our_reference}. '
+            f'All payment references: '
+            f'{list(Payment.objects.values_list("reference", "transaction_id").order_by("-id")[:10])}'
+        )
+        # Still return 200 so PayChangu doesn't keep retrying with wrong data
+        return Response({'status': 'ok', 'note': 'payment not found'}, status=status.HTTP_200_OK)
+
+    logger.info(f'Processing payment #{payment.id}, order #{payment.order.id}, current status={payment.status}')
+
+    if payment_status in ('completed', 'successful', 'success', 'paid'):
+        _mark_payment_completed(payment, transaction_id, data)
+        logger.info(f'✅ Order #{payment.order.id} payment_status now = paid')
+
+    elif payment_status == 'failed':
+        payment.status = 'failed'
+        payment.payment_details = data
+        payment.save()
+        logger.warning(f'Payment failed: #{payment.id}')
+
+    elif payment_status in ('pending', 'processing'):
+        payment.status = 'processing'
+        payment.payment_details = data
+        payment.save()
+
+    else:
+        logger.warning(f'Unknown webhook status: {payment_status!r}')
+
+    return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
 
 def _credit_wallet_on_order_confirmation(order) -> bool:
     """
@@ -247,6 +358,80 @@ def payment_callback(request):
         redirect_url = f'{flutter_base}/#/payment-result?status=success&reference={reference}'
 
     return HttpResponseRedirect(redirect_url)
+
+@api_view(['GET'])
+@drf_permission_classes([AllowAny])
+def payment_callback(request):
+    reference = request.GET.get('reference', '')
+    tx_ref = request.GET.get('tx_ref', reference)
+    cancelled = request.GET.get('cancelled', 'false')
+
+    if cancelled == 'true':
+        title = "Payment Cancelled"
+        message = "Your payment was cancelled. Please return to the app."
+        color = "#e53935"
+        icon = "✕"
+    else:
+        title = "Payment Successful!"
+        message = "Your payment was received. Please return to the app to track your order."
+        color = "#43a047"
+        icon = "✓"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{title}</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                background: #f5f5f5;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 100vh;
+                padding: 20px;
+            }}
+            .card {{
+                background: white;
+                border-radius: 16px;
+                padding: 48px 32px;
+                text-align: center;
+                max-width: 400px;
+                width: 100%;
+                box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+            }}
+            .icon {{
+                width: 72px; height: 72px;
+                border-radius: 50%;
+                background: {color};
+                color: white;
+                font-size: 36px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin: 0 auto 24px;
+            }}
+            h1 {{ font-size: 22px; color: #212121; margin-bottom: 12px; }}
+            p {{ font-size: 15px; color: #757575; line-height: 1.5; margin-bottom: 32px; }}
+            .ref {{ font-size: 12px; color: #bdbdbd; margin-top: 16px; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="icon">{icon}</div>
+            <h1>{title}</h1>
+            <p>{message}</p>
+            <div class="ref">Ref: {reference}</div>
+        </div>
+    </body>
+    </html>
+    """
+    from django.http import HttpResponse
+    return HttpResponse(html, content_type='text/html')
 
 
 # ─── ViewSet ──────────────────────────────────────────────────────────────────
