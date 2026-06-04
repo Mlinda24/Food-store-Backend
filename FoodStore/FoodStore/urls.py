@@ -32,7 +32,7 @@ urlpatterns = [
     path('api/', include('restaurants.urls')),
     path('api/', include('orders.urls')),
     path('api/', include('payments.urls')),
-    path('api/drivers/', include('drivers.urls')),
+    path('api/driver/', include('driver.urls')),
     # DRF login
     path('api-auth/', include('rest_framework.urls')),
 
