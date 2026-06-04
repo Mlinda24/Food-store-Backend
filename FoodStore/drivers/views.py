@@ -135,9 +135,8 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
     @action(detail=False, methods=['get'])
     def available(self, request):
         """Get orders available for delivery - ONLY 'ready' status orders"""
-        # ✅ FIXED: Only show orders that are 'ready' and have no driver assigned
         orders = Order.objects.filter(
-            status='ready',  # ← Only 'ready' orders
+            status='ready',
         ).filter(
             Q(delivery_assignment__isnull=True) |
             Q(delivery_assignment__status='cancelled')
@@ -160,7 +159,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             except:
                 pass
 
-            # Get order items summary
             items_summary = ""
             try:
                 if hasattr(order, 'items') and order.items.exists():
@@ -183,7 +181,7 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 'estimated_time': '25-35 min',
                 'items_summary': items_summary,
                 'status': 'available',
-                'order_status': order.status,  # This will be 'ready'
+                'order_status': order.status,
                 'created': order.created.isoformat() if hasattr(order, 'created') else timezone.now().isoformat(),
             })
 
@@ -250,6 +248,12 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
+        # Check if order is ready
+        if order.status != 'ready':
+            return Response(
+                {'error': f'Order status is {order.status}. Only "ready" orders can be accepted.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         if order.payment_status != 'paid':
             return Response(
@@ -259,9 +263,12 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         
         driver, _ = DriverProfile.objects.get_or_create(user=request.user)
         
+        # Debug logging
+        logger.warning(f'Accept attempt - Driver: {driver.user.username}, Status: {driver.status}')
+        
         if driver.status != 'online':
             return Response(
-                {'error': 'Driver is not online. Please go online first.'},
+                {'error': f'Driver is not online. Current status: {driver.status}. Please go online first.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -282,12 +289,12 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             delivery.accepted_at = timezone.now()
             delivery.save()
             
-            # Update driver status
+            # Update driver status to busy
             driver.status = 'busy'
             driver.is_available = False
             driver.save()
             
-            # ✅ Update order status to 'accepted' to show it's assigned to a driver
+            # Update order status to accepted
             order.status = 'accepted'
             order.save()
             
@@ -338,7 +345,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 delivery.picked_up_at = timezone.now()
                 delivery.save()
                 
-                # Update order status
                 order = delivery.order
                 order.status = 'picked_up'
                 order.save()
@@ -354,7 +360,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 order.status = 'delivered'
                 order.save()
                 
-                # Update driver earnings
                 driver.total_deliveries += 1
                 driver.total_earnings += delivery.delivery_fee
                 driver.current_balance += delivery.delivery_fee
@@ -368,7 +373,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 delivery.status = 'cancelled'
                 delivery.save()
                 
-                # Reset order status back to ready
                 order = delivery.order
                 order.status = 'ready'
                 order.save()
