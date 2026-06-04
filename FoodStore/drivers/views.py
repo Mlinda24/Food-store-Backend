@@ -134,9 +134,10 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
     
     @action(detail=False, methods=['get'])
     def available(self, request):
-        """Get orders available for delivery — confirmed OR ready"""
+        """Get orders available for delivery - ONLY 'ready' status orders"""
+        # ✅ FIXED: Only show orders that are 'ready' and have no driver assigned
         orders = Order.objects.filter(
-            status__in=['confirmed', 'ready'],  # ← drivers see both
+            status='ready',  # ← Only 'ready' orders
             payment_status='paid',
         ).filter(
             Q(delivery_assignment__isnull=True) |
@@ -146,33 +147,48 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         available_orders = []
         for order in orders:
             restaurant_name = "Restaurant"
+            restaurant_address = ""
             try:
                 if hasattr(order, 'restaurant') and order.restaurant:
                     restaurant_name = order.restaurant.name
+                    restaurant_address = order.restaurant.address
                 elif hasattr(order, 'restaurant_id') and order.restaurant_id:
                     from restaurants.models import Restaurant
                     restaurant = Restaurant.objects.filter(id=order.restaurant_id).first()
                     if restaurant:
                         restaurant_name = restaurant.name
+                        restaurant_address = restaurant.address
             except:
                 pass
 
+            # Get order items summary
+            items_summary = ""
+            try:
+                if hasattr(order, 'items') and order.items.exists():
+                    item_count = order.items.count()
+                    items_summary = f"{item_count} item{'s' if item_count > 1 else ''}"
+                else:
+                    items_summary = "Food items"
+            except:
+                items_summary = "Food items"
+
             available_orders.append({
-                'id': order.id,
+                'id': str(order.id),
                 'restaurant_name': restaurant_name,
-                'restaurant_address': getattr(order, 'delivery_address', ''),
+                'restaurant_address': restaurant_address,
                 'customer_name': order.customer.username if order.customer else 'Customer',
                 'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
                 'delivery_address': order.delivery_address,
                 'delivery_fee': float(getattr(order, 'delivery_fee', 2000.00)),
                 'distance': '2.5 km',
                 'estimated_time': '25-35 min',
-                'items_summary': f"{order.items.count()} items" if hasattr(order, 'items') else "Items",
+                'items_summary': items_summary,
                 'status': 'available',
-                'order_status': order.status,  # ← so driver knows if ready or confirmed
+                'order_status': order.status,  # This will be 'ready'
                 'created': order.created.isoformat() if hasattr(order, 'created') else timezone.now().isoformat(),
             })
 
+        logger.info(f'Driver available orders: {len(available_orders)} ready orders found')
         return Response(available_orders)
     
     @action(detail=False, methods=['get'])
@@ -186,18 +202,18 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         for delivery in deliveries:
             order = delivery.order
             result.append({
-                'id': delivery.id,
-                'order_id': order.id,
+                'id': str(delivery.id),
+                'order_id': str(order.id),
                 'restaurant_name': getattr(order, 'restaurant_name', 'Restaurant'),
                 'customer_name': order.customer.username if order.customer else 'Customer',
                 'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
                 'delivery_address': order.delivery_address,
                 'status': delivery.status,
                 'delivery_fee': float(delivery.delivery_fee),
-                'accepted_at': delivery.accepted_at,
-                'picked_up_at': delivery.picked_up_at,
-                'delivered_at': delivery.delivered_at,
-                'created_at': delivery.created_at,
+                'accepted_at': delivery.accepted_at.isoformat() if delivery.accepted_at else None,
+                'picked_up_at': delivery.picked_up_at.isoformat() if delivery.picked_up_at else None,
+                'delivered_at': delivery.delivered_at.isoformat() if delivery.delivered_at else None,
+                'created_at': delivery.created_at.isoformat(),
             })
         
         return Response(result)
@@ -212,16 +228,18 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             )
             order = active_delivery.order
             return Response({
-                'id': active_delivery.id,
-                'order_id': order.id,
+                'id': str(active_delivery.id),
+                'order_id': str(order.id),
                 'restaurant_name': getattr(order, 'restaurant_name', 'Restaurant'),
+                'restaurant_address': getattr(order, 'delivery_address', ''),
                 'customer_name': order.customer.username if order.customer else 'Customer',
                 'customer_phone': order.customer.phone if order.customer and order.customer.phone else '',
                 'delivery_address': order.delivery_address,
                 'status': active_delivery.status,
                 'delivery_fee': float(active_delivery.delivery_fee),
-                'accepted_at': active_delivery.accepted_at,
-                'picked_up_at': active_delivery.picked_up_at,
+                'accepted_at': active_delivery.accepted_at.isoformat() if active_delivery.accepted_at else None,
+                'picked_up_at': active_delivery.picked_up_at.isoformat() if active_delivery.picked_up_at else None,
+                'items_summary': f"{order.items.count()} items" if hasattr(order, 'items') else "Food items",
             })
         except DeliveryAssignment.DoesNotExist:
             return Response({})
@@ -233,10 +251,10 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # ← accept both confirmed and ready orders
-        if order.status not in ('confirmed', 'ready'):
+        # ✅ Allow acceptance only for 'ready' orders
+        if order.status != 'ready':
             return Response(
-                {'error': f'Order status is {order.status}, cannot accept for delivery'},
+                {'error': f'Order status is {order.status}. Only "ready" orders can be accepted for delivery.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -254,9 +272,8 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if DeliveryAssignment.objects.filter(
-            order=order
-        ).exclude(status='cancelled').exists():
+        # Check if already assigned
+        if DeliveryAssignment.objects.filter(order=order).exclude(status='cancelled').exists():
             return Response(
                 {'error': 'Order already assigned to a driver'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -272,14 +289,21 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             delivery.accepted_at = timezone.now()
             delivery.save()
             
+            # Update driver status
             driver.status = 'busy'
             driver.is_available = False
             driver.save()
+            
+            # ✅ Update order status to 'accepted' to show it's assigned to a driver
+            order.status = 'accepted'
+            order.save()
+            
+            logger.info(f'Driver {driver.user.username} accepted order #{order.id}')
         
         return Response({
             'success': True,
-            'id': delivery.id,
-            'order_id': order.id,
+            'id': str(delivery.id),
+            'order_id': str(order.id),
             'status': delivery.status,
             'message': 'Order accepted successfully'
         }, status=status.HTTP_201_CREATED)
@@ -290,6 +314,7 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             order = Order.objects.get(id=pk)
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+        logger.info(f'Driver declined order #{order.id}')
         return Response({'success': True, 'message': 'Order declined'})
     
     @action(detail=True, methods=['patch'])
@@ -320,6 +345,13 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 delivery.picked_up_at = timezone.now()
                 delivery.save()
                 
+                # Update order status
+                order = delivery.order
+                order.status = 'picked_up'
+                order.save()
+                
+                logger.info(f'Driver {driver.user.username} picked up order #{order.id}')
+                
             elif new_status == 'delivered':
                 delivery.status = 'delivered'
                 delivery.delivered_at = timezone.now()
@@ -329,6 +361,7 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 order.status = 'delivered'
                 order.save()
                 
+                # Update driver earnings
                 driver.total_deliveries += 1
                 driver.total_earnings += delivery.delivery_fee
                 driver.current_balance += delivery.delivery_fee
@@ -342,13 +375,20 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 delivery.status = 'cancelled'
                 delivery.save()
                 
+                # Reset order status back to ready
+                order = delivery.order
+                order.status = 'ready'
+                order.save()
+                
                 driver.status = 'online'
                 driver.is_available = True
                 driver.save()
+                
+                logger.info(f'Delivery #{delivery.id} cancelled by driver')
         
         return Response({
             'success': True,
-            'id': delivery.id,
+            'id': str(delivery.id),
             'status': delivery.status,
             'message': f'Delivery status updated to {new_status}'
         })
