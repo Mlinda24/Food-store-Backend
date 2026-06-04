@@ -134,13 +134,12 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
     
     @action(detail=False, methods=['get'])
     def available(self, request):
-        """Get orders available for delivery - ONLY 'ready' status orders"""
-        # ✅ FIXED: Only show orders that are 'ready' and have no driver assigned
         orders = Order.objects.filter(
-            status='ready',  # ← Only 'ready' orders
+        status='ready',
+        payment_status='paid',  # ← ADD THIS LINE
         ).filter(
-            Q(delivery_assignment__isnull=True) |
-            Q(delivery_assignment__status='cancelled')
+        Q(delivery_assignment__isnull=True) |
+        Q(delivery_assignment__status='cancelled')
         ).order_by('-created')
 
         available_orders = []
@@ -181,7 +180,7 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
                 'delivery_fee': float(getattr(order, 'delivery_fee', 2000.00)),
                 'distance': '2.5 km',
                 'estimated_time': '25-35 min',
-                'items_summary': items_summary,
+                'items': items_summary,
                 'status': 'available',
                 'order_status': order.status,  # This will be 'ready'
                 'created': order.created.isoformat() if hasattr(order, 'created') else timezone.now().isoformat(),
@@ -287,8 +286,11 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             driver.is_available = False
             driver.save()
             
-            # ✅ Update order status to 'accepted' to show it's assigned to a driver
-            order.status = 'accepted'
+            order.status = 'driver_assigned'  # ✅ correct
+            order.driver_id = driver.user.id
+            order.driver_name = driver.user.get_full_name() or driver.user.username
+            order.driver_assigned_at = timezone.now()
+            order.driver_accepted_at = timezone.now()
             order.save()
             
             logger.info(f'Driver {driver.user.username} accepted order #{order.id}')
