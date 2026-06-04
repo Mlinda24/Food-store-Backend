@@ -203,7 +203,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             'delivery_address': delivery_address,
             'note': request.data.get('note', ''),
             'status': 'pending',
-            'payment_status': 'paid',
+            'payment_status': 'pending',
         }
 
         if RESTAURANTS_AVAILABLE:

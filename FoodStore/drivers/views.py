@@ -287,7 +287,7 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             driver.is_available = False
             driver.save()
             
-            order.status = 'driver_assigned'  # ✅ correct
+            order.status = 'driver_assigned'
             order.driver_id = driver.user.id
             order.driver_name = driver.user.get_full_name() or driver.user.username
             order.driver_assigned_at = timezone.now()
