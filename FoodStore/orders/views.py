@@ -354,7 +354,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             orders = Order.objects.filter(
                 restaurant_id=restaurant.id,
                 status='pending',
-                payment_status='paid',
             ).order_by('-created')
             serializer = self.get_serializer(orders, many=True)
             return Response(serializer.data)
