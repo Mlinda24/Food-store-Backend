@@ -4,7 +4,7 @@ from .views import DriverViewSet, DeliveryOrderViewSet
 
 router = DefaultRouter()
 router.register(r'drivers', DriverViewSet, basename='driver')
-router.register(r'delivery/orders', DeliveryOrderViewSet, basename='delivery-order')
+router.register(r'orders', DeliveryOrderViewSet, basename='delivery-order')
 
 urlpatterns = [
     path('', include(router.urls)),
