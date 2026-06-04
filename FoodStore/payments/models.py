@@ -40,6 +40,14 @@ class Payment(models.Model):
         default=False,
         help_text="Whether money has been distributed to wallets"
     )
+
+    pending_restaurant_amount = models.DecimalField(
+    max_digits=10,
+    decimal_places=2,
+    default=0,
+    help_text="Amount held for restaurant, pending their confirmation"
+
+)
     
     distributed_at = models.DateTimeField(
         null=True, 

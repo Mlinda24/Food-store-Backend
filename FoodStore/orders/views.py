@@ -322,136 +322,15 @@ class OrderViewSet(viewsets.ModelViewSet):
             'order': serializer.data
         }, status=status.HTTP_200_OK)
 
-    def _credit_wallet_on_confirmation(self, order):
-        """
-        Credit the restaurant wallet when the restaurant confirms an order.
+   # In OrderViewSet.update_status(), replace the wallet credit block:
 
-        Rules:
-        - Only runs when order status transitions TO 'confirmed' (enforced by caller).
-        - Only credits if payment.status is 'completed' (PayChangu webhook sets this).
-        - The distributed_to_wallets flag is the idempotency guard — prevents double credit.
-        - Never credits for cancelled/declined orders (caller guards against that).
-        """
-        try:
-            from payments.models import Payment
-            from decimal import Decimal
-
-            # ── 1. Find the payment ────────────────────────────────────────────
-            try:
-                payment = Payment.objects.get(order=order)
-            except Payment.DoesNotExist:
-                logger.warning(f'Order #{order.id}: no Payment record found — cannot credit wallet')
-                return False
-            except Payment.MultipleObjectsReturned:
-                # Take the most recent completed one
-                payment = Payment.objects.filter(order=order, status='completed').order_by('-created_at').first()
-                if not payment:
-                    logger.warning(f'Order #{order.id}: multiple payments but none completed')
-                    return False
-
-            # ── 2. Check payment is completed ─────────────────────────────────
-            # FIX: log the actual status so you can catch mismatches (e.g. 'paid' vs 'completed')
-            logger.info(f'Order #{order.id}: payment.status={payment.status!r}, distributed={payment.distributed_to_wallets}')
-
-            if payment.status != 'completed':
-                logger.warning(
-                    f'Order #{order.id}: payment status is {payment.status!r}, not "completed" — '
-                    f'wallet NOT credited. Check your PayChangu webhook sets status="completed".'
-                )
-                return False
-
-            # ── 3. Idempotency guard ───────────────────────────────────────────
-            if payment.distributed_to_wallets:
-                logger.info(f'Order #{order.id}: wallet already credited — skipping')
-                return True  # Not a failure, just already done
-
-            # ── 4. Get restaurant ──────────────────────────────────────────────
-            restaurant = order.restaurant
-            if not restaurant:
-                logger.warning(f'Order #{order.id}: no restaurant linked — cannot credit wallet')
-                return False
-
-            # ── 5. Calculate amounts ───────────────────────────────────────────
-            total_amount = Decimal(str(payment.amount))
-            platform_fee_percent = Decimal('10.00')
-            platform_fee = (total_amount * platform_fee_percent) / Decimal('100')
-
-            # FIX: always recalculate rather than relying on pending_restaurant_amount,
-            # which may be None if the payment was created before that field existed.
-            if (
-                hasattr(payment, 'pending_restaurant_amount')
-                and payment.pending_restaurant_amount
-                and payment.pending_restaurant_amount > 0
-            ):
-                restaurant_amount = Decimal(str(payment.pending_restaurant_amount))
-            else:
-                restaurant_amount = total_amount - platform_fee
-
-            logger.info(
-                f'Order #{order.id}: total={total_amount}, fee={platform_fee}, '
-                f'restaurant_amount={restaurant_amount}'
-            )
-
-            # ── 6. Credit wallet ───────────────────────────────────────────────
-            wallet, created = RestaurantWallet.objects.get_or_create(restaurant=restaurant)
-            if created:
-                logger.info(f'Created new wallet for restaurant: {restaurant.name}')
-
-            wallet.balance += restaurant_amount
-            wallet.total_earned += restaurant_amount
-            wallet.save(update_fields=['balance', 'total_earned'])
-
-            # ── 7. Transaction record ──────────────────────────────────────────
-            WalletTransaction.objects.create(
-                wallet=wallet,
-                transaction_type='credit',
-                amount=restaurant_amount,
-                status='successful',
-                description=(
-                    f'Order #{order.id} confirmed — payment from {order.customer.username} '
-                    f'(MK{total_amount:,.2f} total, MK{platform_fee:,.2f} platform fee)'
-                ),
-            )
-
-            # ── 8. Mark payment as distributed (idempotency) ──────────────────
-            payment.distributed_to_wallets = True
-            payment.distributed_at = timezone.now()
-            payment.restaurant_amount = restaurant_amount
-            payment.save(update_fields=['distributed_to_wallets', 'distributed_at', 'restaurant_amount'])
-
-            logger.info(
-                f'✅ Wallet credited for order #{order.id}: '
-                f'MK{restaurant_amount:,.2f} → {restaurant.name}'
-            )
-
-            # ── 9. Notify restaurant owner ─────────────────────────────────────
-            try:
-                from notifications.services import NotificationService
-                NotificationService.send_notification(
-                    user=restaurant.owner,
-                    notification_type='wallet',
-                    title='Wallet Credited',
-                    message=(
-                        f'Order #{order.id} confirmed. '
-                        f'MK{restaurant_amount:,.2f} credited to your wallet.'
-                    ),
-                    data={'order_id': str(order.id), 'amount': str(restaurant_amount)},
-                    send_email=True,
-                    send_sms=False,
-                    priority='high',
-                )
-            except Exception as e:
-                logger.error(f'Wallet notification failed for order #{order.id}: {e}')
-
-            return True
-
-        except Exception as e:
-            logger.error(
-                f'❌ Error crediting wallet for order #{order.id}: {e}',
-                exc_info=True,
-            )
-            return False
-
+if new_status == 'confirmed' and old_status != 'confirmed':
+    logger.info(f'Order #{order.id} confirmed — crediting wallet')
+    try:
+        from payments.views import _credit_wallet_on_order_confirmation
+        _credit_wallet_on_order_confirmation(order)
+    except Exception as e:
+        logger.error(f'Wallet credit failed for order #{order.id}: {e}')
     @action(detail=False, methods=['get'])
     def my_orders(self, request):
         """Get orders for the current user (customer)"""
