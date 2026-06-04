@@ -86,9 +86,21 @@ USE_TZ = True
 STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS Settings
+# ─── CORS ─────────────────────────────────────────────────────────────────────
+
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True') == 'True'
-CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://food-store-backend-4eo6.onrender.com,http://10.30.191.43:8080,http://10.30.191.43:57226').split(',')
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    'CORS_ALLOWED_ORIGINS',
+    'https://food-store-backend-4eo6.onrender.com,http://10.30.191.43:8080,http://10.30.191.43:57226'
+).split(',')
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT']
+CORS_ALLOW_HEADERS = [
+    'accept', 'accept-encoding', 'authorization', 'content-type',
+    'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
+]
+
+# ─── REST Framework ───────────────────────────────────────────────────────────
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -99,17 +111,64 @@ REST_FRAMEWORK = {
     ),
 }
 
-# Cloudinary Configuration
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+# ─── Cloudinary ───────────────────────────────────────────────────────────────
+
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('dvtfdu0yq'),
-    'API_KEY': os.environ.get('997758335625531'),
-    'API_SECRET': os.environ.get('Mlf9ODhvLsAuqAMRhTkxRyNmnsU'),
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'dvtfdu0yq'),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '997758335625531'),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'Mlf9ODhvLsAuqAMRhTkxRyNmnsU'),
 }
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
-# PayChangu Payment Settings
-PAYCHANGU_PUBLIC_KEY = os.environ.get('pub-live-nQVBz1lqviEBzeUwpnfLmNXwXPPtcFWI')
-PAYCHANGU_SECRET_KEY = os.environ.get('sec-live-WurRorxIoLUDYOq4lin27lo3whqa62jD')
+# ─── PayChangu ────────────────────────────────────────────────────────────────
+
+PAYCHANGU_PUBLIC_KEY = os.environ.get('PAYCHANGU_PUBLIC_KEY', 'pub-live-nQVBz1lqviEBzeUwpnfLmNXwXPPtcFWI')
+PAYCHANGU_SECRET_KEY = os.environ.get('PAYCHANGU_SECRET_KEY', 'sec-live-WurRorxIoLUDYOq4lin27lo3whqa62jD')
 PAYCHANGU_BASE_URL = os.environ.get('PAYCHANGU_BASE_URL', 'https://api.paychangu.com')
-PAYCHANGU_WEBHOOK_SECRET = os.environ.get('Tambudzai1939')
+PAYCHANGU_WEBHOOK_SECRET = os.environ.get('PAYCHANGU_WEBHOOK_SECRET', 'Tambudzai1939')
 WEBHOOK_BASE_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://food-store-backend-4eo6.onrender.com')
+
+# Flutter web app URL — where browser is redirected after Paychangu payment
+FLUTTER_WEB_URL = os.environ.get('FLUTTER_WEB_URL', 'http://localhost:55723')
+
+# ─── Email ────────────────────────────────────────────────────────────────────
+
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'Bsc-21-22@unima.ac.mw')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'cxwjbnbhaoipfctz')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Bsc-21-22@unima.ac.mw')
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{levelname}] {asctime} {module}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {'handlers': ['console'], 'level': 'DEBUG'},
+    'loggers': {
+        'django': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        'payments': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
+        'accounts': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
+    },
+}
