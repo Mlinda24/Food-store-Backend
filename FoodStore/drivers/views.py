@@ -250,12 +250,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # ✅ Allow acceptance only for 'ready' orders
-        if order.status != 'ready':
-            return Response(
-                {'error': f'Order status is {order.status}. Only "ready" orders can be accepted for delivery.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         
         if order.payment_status != 'paid':
             return Response(
