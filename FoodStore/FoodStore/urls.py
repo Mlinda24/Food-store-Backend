@@ -30,7 +30,7 @@ urlpatterns = [
 
     # App endpoints
     path('api/', include('restaurants.urls')),
-    path('api/', include('orders.urls')),
+    path('api/orders', include('orders.urls')),
     path('api/', include('payments.urls')),
     path('api/drivers/', include('drivers.urls')),
     
