@@ -268,17 +268,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        paid_statuses = {'confirmed', 'preparing', 'ready', 'picked_up', 'delivered'}
-        if new_status in paid_statuses and order.payment_status != 'paid':
-            return Response(
-                {
-                    'error': f"Cannot set status to '{new_status}' — order has not been paid yet.",
-                    'payment_status': order.payment_status,
-                    'current_status': order.status,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         order.status = new_status
         order.save()
 
