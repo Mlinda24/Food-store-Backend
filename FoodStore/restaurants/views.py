@@ -101,7 +101,7 @@ class RestaurantViewSet(viewsets.ModelViewSet):
         total_orders = Order.objects.filter(restaurant_id=restaurant.id)
         active_orders = Order.objects.filter(
             restaurant_id=restaurant.id,
-            status__in=['pending', 'confirmed', 'preparing'],
+            status__in=['pending', 'confirmed', 'preparing', 'ready', 'driver_assigned'],
         )
 
         def _sum(qs):

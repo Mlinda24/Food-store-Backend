@@ -221,10 +221,10 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
     def active(self, request):
         driver, _ = DriverProfile.objects.get_or_create(user=request.user)
         try:
-            active_delivery = DeliveryAssignment.objects.get(
+            active_delivery = DeliveryAssignment.objects.filter(
                 driver=driver,
                 status__in=['accepted', 'picked_up']
-            )
+            ).first()
             order = active_delivery.order
             return Response({
                 'id': str(active_delivery.id),
