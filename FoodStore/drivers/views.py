@@ -250,12 +250,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
         
-        if order.payment_status != 'paid':
-            return Response(
-                {'error': 'Order has not been paid yet'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         driver, _ = DriverProfile.objects.get_or_create(user=request.user)
         
         if driver.status != 'online':
