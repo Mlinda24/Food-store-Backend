@@ -137,7 +137,6 @@ class DeliveryOrderViewSet(viewsets.GenericViewSet):
     def available(self, request):
         orders = Order.objects.filter(
         status='ready',
-        payment_status='paid',  # ← ADD THIS LINE
         ).filter(
         Q(delivery_assignment__isnull=True) |
         Q(delivery_assignment__status='cancelled')
