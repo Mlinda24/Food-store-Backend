@@ -316,6 +316,28 @@ class OrderViewSet(viewsets.ModelViewSet):
             'message': f'Order status updated to {new_status}',
             'order': serializer.data
         }, status=status.HTTP_200_OK)
+    
+        try:
+            from notifications.services import NotificationService
+            NotificationService.send_notification(
+                user=order.customer,
+                notification_type='order',
+                title=f'Order {new_status.capitalize()}',
+                message=f'Your order #{order.id} status has been updated to {new_status}.',
+                data={'order_id': str(order.id), 'status': new_status},
+                send_email=False,
+                send_sms=False,
+                priority='high',
+            )
+        except Exception as e:
+            logger.error(f'Notification failed for order #{order.id}: {e}')
+
+        serializer = self.get_serializer(order)
+        return Response({
+            'success': True,
+            'message': f'Order status updated to {new_status}',
+            'order': serializer.data
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'])
     def my_orders(self, request):
