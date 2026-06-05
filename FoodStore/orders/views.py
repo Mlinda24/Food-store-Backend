@@ -248,8 +248,9 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
         valid_statuses = [
-            'pending', 'confirmed', 'preparing',
-            'ready', 'picked_up', 'delivered', 'cancelled',
+            'pending', 'confirmed', 'preparing', 'ready',
+            'driver_assigned', 'picked_up', 'out_for_delivery',
+            'delivered', 'cancelled', 'rejected', 'received',
         ]
         if new_status not in valid_statuses:
             return Response(
@@ -273,25 +274,41 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         logger.info(f'Order #{order.id} status updated: {old_status} → {new_status}')
 
-        # Credit wallet ONLY when restaurant confirms — never on decline
         if new_status == 'confirmed' and old_status != 'confirmed':
-         logger.info(f'Order #{order.id} confirmed — crediting wallet')
-    try:
-        from payments.views import _credit_wallet_on_order_confirmation, _verify_with_paychangu
-        from payments.models import Payment as PaymentModel
-        # If payment is still processing, verify with PayChangu first
+            logger.info(f'Order #{order.id} confirmed — crediting wallet')
+            try:
+                from payments.views import (
+                    _credit_wallet_on_order_confirmation,
+                    _verify_with_paychangu,
+                    _mark_payment_completed,
+                )
+                from payments.models import Payment as PaymentModel
+                try:
+                    payment = PaymentModel.objects.get(order=order)
+                    if payment.status in ('processing', 'pending') and payment.transaction_id:
+                        remote_status, tx_id, raw_data = _verify_with_paychangu(payment.transaction_id)
+                        if remote_status in ('completed', 'successful', 'success'):
+                            _mark_payment_completed(payment, tx_id, raw_data)
+                except PaymentModel.DoesNotExist:
+                    pass
+                _credit_wallet_on_order_confirmation(order)
+            except Exception as e:
+                logger.error(f'Wallet credit failed for order #{order.id}: {e}')
+
         try:
-            payment = PaymentModel.objects.get(order=order)
-            if payment.status in ('processing', 'pending') and payment.transaction_id:
-                from payments.views import _mark_payment_completed
-                remote_status, tx_id, raw_data = _verify_with_paychangu(payment.transaction_id)
-                if remote_status in ('completed', 'successful', 'success'):
-                    _mark_payment_completed(payment, tx_id, raw_data)
-        except PaymentModel.DoesNotExist:
-            pass
-        _credit_wallet_on_order_confirmation(order)
-    except Exception as e:
-        logger.error(f'Wallet credit failed for order #{order.id}: {e}')
+            from notifications.services import NotificationService
+            NotificationService.send_notification(
+                user=order.customer,
+                notification_type='order',
+                title=f'Order {new_status.capitalize()}',
+                message=f'Your order #{order.id} status has been updated to {new_status}.',
+                data={'order_id': str(order.id), 'status': new_status},
+                send_email=False,
+                send_sms=False,
+                priority='high',
+            )
+        except Exception as e:
+            logger.error(f'Notification failed for order #{order.id}: {e}')
 
         serializer = self.get_serializer(order)
         return Response({
