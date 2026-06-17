@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Test Email from Food Store</title>
+</head>
+<body style="font-family: Arial, sans-serif;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd;">
+        <h2 style="color: #ff6b35;">Food Store Test Email</h2>
+        
+        <p>Hello <strong>{{ user.username }}</strong>,</p>
+        
+        <p>This is a test email from your Food Store application.</p>
+        
+        <div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0;">
+            <p><strong>Test Data:</strong> {{ test_message }}</p>
+            <p><strong>Timestamp:</strong> {{ timestamp }}</p>
+        </div>
+        
+        <p>If you received this, your email system is working correctly! ✅</p>
+        
+        <hr>
+        <p style="font-size: 12px; color: #666;">Food Store App - Test Email</p>
+    </div>
+</body>
+</html>
